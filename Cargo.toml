@@ -56,3 +56,7 @@ tree-sitter-typescript = "0.23"
 
 # .gitignore-aware file enumeration. Pure-Rust, from the ripgrep ecosystem.
 ignore = "0.4"
+
+# TOML parser for the user config file at $XDG_CONFIG_HOME/yargent/config.toml.
+# Pure-Rust, no native deps.
+toml = "1"

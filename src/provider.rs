@@ -87,15 +87,6 @@ impl OpenAICompatProvider {
         }
     }
 
-    /// Preset for DeepSeek (<https://api.deepseek.com>).
-    pub fn deepseek(api_key: String, model: String) -> Self {
-        Self::new("https://api.deepseek.com", api_key, model)
-    }
-
-    /// Preset for OpenAI (<https://api.openai.com>).
-    pub fn openai(api_key: String, model: String) -> Self {
-        Self::new("https://api.openai.com", api_key, model)
-    }
 }
 
 #[derive(Serialize)]
@@ -194,19 +185,23 @@ impl LLMProvider for OpenAICompatProvider {
 /// `x-api-key` header rather than `Authorization: Bearer ...`.
 pub struct AnthropicProvider {
     client: reqwest::Client,
+    base_url: String,
     api_key: String,
     model: String,
     max_tokens: u32,
 }
 
 impl AnthropicProvider {
-    /// Construct a provider against <https://api.anthropic.com>.
+    /// Construct a provider against an Anthropic-compatible endpoint.
     ///
+    /// `base_url` is typically `https://api.anthropic.com`; passing a different
+    /// URL lets you point at a proxy that speaks the same protocol.
     /// `max_tokens` defaults to 8192, generous enough for code-shaped responses
     /// while still bounded. Anthropic requires the field on every request.
-    pub fn new(api_key: String, model: String) -> Self {
+    pub fn new(base_url: impl Into<String>, api_key: String, model: String) -> Self {
         Self {
             client: reqwest::Client::new(),
+            base_url: base_url.into(),
             api_key,
             model,
             max_tokens: 8192,
@@ -277,9 +272,10 @@ impl LLMProvider for AnthropicProvider {
             stream: true,
         };
 
+        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let resp = self
             .client
-            .post("https://api.anthropic.com/v1/messages")
+            .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .json(&body)

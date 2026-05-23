@@ -17,7 +17,7 @@ Learning project, built in phases. Each phase ends with something usable.
 | 3 | File editing (SEARCH/REPLACE blocks, diff preview) | ✅ done |
 | 4 | Git integration (auto-commit, `/undo`) | ✅ done |
 | 5 | Tree-sitter repo map (PageRank over symbol graph) | ✅ done |
-| 6 | Config file, multi-provider polish | ⬜ planned |
+| 6 | Config file, custom providers, session flags | ✅ done |
 
 ## Quickstart
 
@@ -45,13 +45,17 @@ Override the model with `--model backend/model`:
 ./target/release/yargent --model anthropic/claude-sonnet-4-6 "..."
 ```
 
-The backend prefix selects which `*_API_KEY` we read:
+The backend prefix selects which `*_API_KEY` we read by default:
 
 | Backend prefix | Env var | Endpoint |
 |---|---|---|
 | `deepseek/` | `DEEPSEEK_API_KEY` | `api.deepseek.com` |
 | `openai/` | `OPENAI_API_KEY` | `api.openai.com` |
 | `anthropic/` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
+
+You can also define your own backends in the [config file](#configuration) —
+Ollama, OpenRouter, lm-studio, and any other OpenAI-compatible endpoint
+become first-class once they're listed under `[providers.X]`.
 
 Prepend a system prompt with `--system`:
 
@@ -195,6 +199,62 @@ We shell out to the system `git` binary rather than linking a Rust git library:
 Subprocess overhead is invisible at human-latency. Worth revisiting if we
 ever need to embed yargent somewhere without a git binary on PATH.
 
+## Configuration
+
+yargent runs with zero config — set a `*_API_KEY` env var and you're done.
+For anything more, create `$XDG_CONFIG_HOME/yargent/config.toml` (typically
+`~/.config/yargent/config.toml`). Every field is optional.
+
+```toml
+# Pick this model when --model isn't passed on the CLI.
+default_model = "deepseek/deepseek-chat"
+
+# Override a built-in provider — here, bake the API key in.
+[providers.deepseek]
+api_key = "sk-..."
+
+# Add your own provider. Ollama exposes an OpenAI-compatible endpoint at /v1:
+[providers.ollama]
+kind = "openai-compat"
+base_url = "http://localhost:11434/v1"
+api_key = "ollama"        # Ollama doesn't actually check, but the field is required
+
+# OpenRouter — read the key from a custom env var, not OPENROUTER_API_KEY.
+[providers.openrouter]
+kind = "openai-compat"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_KEY"
+
+# Repo-map tuning. Both fields are optional.
+[repomap]
+enabled = true        # default true; toggle at runtime with /map-on/-off
+token_budget = 1024   # default 1024 tokens
+```
+
+After defining `[providers.ollama]` you can use `--model ollama/llama3.2`,
+and the resolver picks up the base URL and key from the config. The kind
+field is one of `"openai-compat"` (most things) or `"anthropic"` (the
+Messages API shape — useful if you're proxying Anthropic through your own
+service).
+
+**Precedence** (most to least specific):
+
+- API key: explicit `api_key` in config → env var named by `api_key_env` →
+  conventional `$<NAME>_API_KEY` env var. Config wins so a stale env var
+  doesn't quietly break a working setup.
+- Model: `--model` CLI flag → `default_model` in config → built-in
+  `deepseek/deepseek-chat`.
+
+### Session flags
+
+A few flags switch features off for one session without editing config:
+
+```bash
+./target/release/yargent --no-commit "..."   # don't auto-commit edits
+./target/release/yargent --no-map "..."      # don't inject the repo map
+./target/release/yargent --config /tmp/test-config.toml   # use a different config file
+```
+
 ## Building on Termux (Android)
 
 ```bash
@@ -225,7 +285,8 @@ src/
 ├── files.rs      FileContext: tracks added paths, renders them for the model
 ├── edit.rs       SEARCH/REPLACE parser, applier, diff preview, system prompt
 ├── git.rs        Repo discovery + auto-commit + /undo via subprocess git
-└── repomap.rs    Tree-sitter walker + PageRank symbol map injection
+├── repomap.rs    Tree-sitter walker + PageRank symbol map injection
+└── config.rs     TOML config: default model, custom providers, repo-map tuning
 ```
 
 ### The core trait
@@ -283,8 +344,9 @@ builds painful, and it also keeps cross-compilation simple.
 | `similar` | Diff rendering | Pure-Rust. We use `TextDiff::from_lines` for the unified-diff preview shown before applying edits. ANSI colors are bare escape sequences, no extra terminal crate. |
 | `tree-sitter` + grammars | Repo-map parsing | C-based but small and notoriously portable. Grammar crates compile their own C parser via `build.rs`; on Termux this needs `pkg install clang`. |
 | `ignore` | File walker | From the ripgrep ecosystem. Pure-Rust. Respects `.gitignore` so the map doesn't drown in `target/` and `node_modules/`. |
+| `toml` | Config parser | Pure-Rust TOML for `$XDG_CONFIG_HOME/yargent/config.toml`. |
 
-Direct deps: 19. Indirect: ~170 (normal for an async networking app with parsers).
+Direct deps: 20. Indirect: ~175 (normal for an async networking app with parsers).
 
 ## Rust concepts in this codebase
 
@@ -332,7 +394,8 @@ cargo run -- "test prompt" # Build + run debug build
 ### Files & data
 
 - History file: `~/.local/share/yargent/history` (Linux/Termux — XDG data dir).
-- No config file yet; everything goes via CLI flags and `*_API_KEY` env vars.
+- Config file: `~/.config/yargent/config.toml` (optional). See
+  [Configuration](#configuration) above.
 
 ## License
 

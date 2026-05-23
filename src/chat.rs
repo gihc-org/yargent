@@ -20,20 +20,44 @@ use crate::git::Repo;
 use crate::provider::{LLMProvider, Message};
 use crate::repomap::RepoMap;
 
-/// How many tokens of repo-map text we're willing to spend per request. The
-/// rendered map is truncated to fit; lowest-PageRanked files drop first.
-const MAP_TOKEN_BUDGET: usize = 1024;
+/// How many tokens of repo-map text we're willing to spend per request when
+/// the user hasn't set their own budget. The rendered map is truncated to
+/// fit; lowest-PageRanked files drop first.
+const DEFAULT_MAP_TOKEN_BUDGET: usize = 1024;
+
+/// Per-session settings derived from CLI flags + config file. Built in
+/// `main.rs` and passed to [`run_chat`] verbatim.
+pub struct SessionOptions {
+    /// Skip auto-commit even when inside a git repo (CLI: `--no-commit`).
+    pub no_commit: bool,
+    /// Skip injecting the repo map at all (CLI: `--no-map`).
+    pub no_map: bool,
+    /// Token budget for the rendered repo map. `None` means use
+    /// [`DEFAULT_MAP_TOKEN_BUDGET`].
+    pub map_token_budget: Option<usize>,
+    /// Whether the repo map is enabled by default for this session. The
+    /// user can still toggle with `/map-on` / `/map-off` at runtime.
+    pub map_default_enabled: bool,
+}
 
 /// Run the interactive chat loop until the user exits with `/quit` or Ctrl-D.
 ///
 /// `system`, if provided, is concatenated *after* yargent's built-in coding
 /// system prompt. Line-edit history persists to
 /// `~/.local/share/yargent/history`.
-pub async fn run_chat(provider: Box<dyn LLMProvider>, system: Option<String>) -> Result<()> {
+pub async fn run_chat(
+    provider: Box<dyn LLMProvider>,
+    system: Option<String>,
+    opts: SessionOptions,
+) -> Result<()> {
     let tokenizer = tiktoken_rs::cl100k_base()?;
-    let repo = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| Repo::discover(&cwd));
+    let repo = if opts.no_commit {
+        None
+    } else {
+        std::env::current_dir()
+            .ok()
+            .and_then(|cwd| Repo::discover(&cwd))
+    };
 
     // Build the repo map up-front. For typical repo sizes this is a couple
     // hundred ms; for very large repos (10k+ files) it can be several seconds,
@@ -53,7 +77,9 @@ pub async fn run_chat(provider: Box<dyn LLMProvider>, system: Option<String>) ->
         map_start.elapsed().as_secs_f32()
     );
 
-    let mut state = ChatState::new(system, tokenizer, repo, repomap);
+    let map_enabled = opts.map_default_enabled && !opts.no_map;
+    let map_token_budget = opts.map_token_budget.unwrap_or(DEFAULT_MAP_TOKEN_BUDGET);
+    let mut state = ChatState::new(system, tokenizer, repo, repomap, map_enabled, map_token_budget);
 
     let mut rl = rustyline::DefaultEditor::new()?;
     let history_path = history_file_path();
@@ -174,6 +200,10 @@ struct ChatState {
     /// Whether to inject the rendered repo map on each outgoing request.
     /// Toggled with `/map-on` / `/map-off`.
     map_enabled: bool,
+    /// Per-session token budget for the rendered repo map. Resolved at
+    /// startup from CLI/config; held as a field so the budget survives
+    /// `/map-rebuild`.
+    map_token_budget: usize,
 }
 
 impl ChatState {
@@ -182,6 +212,8 @@ impl ChatState {
         tokenizer: CoreBPE,
         repo: Option<Repo>,
         repomap: RepoMap,
+        map_enabled: bool,
+        map_token_budget: usize,
     ) -> Self {
         Self {
             user_system,
@@ -190,7 +222,8 @@ impl ChatState {
             tokenizer,
             repo,
             repomap,
-            map_enabled: true,
+            map_enabled,
+            map_token_budget,
         }
     }
 
@@ -226,7 +259,7 @@ impl ChatState {
         if self.map_enabled && !self.repomap.is_empty() {
             let rendered =
                 self.repomap
-                    .render(&focused_paths, MAP_TOKEN_BUDGET, &self.tokenizer);
+                    .render(&focused_paths, self.map_token_budget, &self.tokenizer);
             if !rendered.is_empty() {
                 context.push_str(&rendered);
                 if !context.ends_with('\n') {
@@ -429,7 +462,7 @@ fn handle_slash(cmd: &str, state: &mut ChatState) -> bool {
             let rendered =
                 state
                     .repomap
-                    .render(&focused, MAP_TOKEN_BUDGET, &state.tokenizer);
+                    .render(&focused, state.map_token_budget, &state.tokenizer);
             print!("{rendered}");
         }
         "map-on" => {
