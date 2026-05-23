@@ -14,6 +14,7 @@ use futures_util::StreamExt;
 mod chat;
 mod edit;
 mod files;
+mod git;
 mod provider;
 use provider::{AnthropicProvider, LLMProvider, Message, OpenAICompatProvider};
 

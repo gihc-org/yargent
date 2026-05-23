@@ -15,7 +15,7 @@ Learning project, built in phases. Each phase ends with something usable.
 | 1.5 | Anthropic provider (Claude) alongside OpenAI-compat | ✅ done |
 | 2 | File context (`/add foo.rs`, `/drop`, token counts) | ✅ done |
 | 3 | File editing (SEARCH/REPLACE blocks, diff preview) | ✅ done |
-| 4 | Git integration via `gix` (auto-commit, `/undo`) | ⬜ planned |
+| 4 | Git integration (auto-commit, `/undo`) | ✅ done |
 | 5 | Tree-sitter repo map (PageRank over symbol graph) | ⬜ planned |
 | 6 | Config file, multi-provider polish | ⬜ planned |
 
@@ -117,6 +117,48 @@ once), that edit is reported and skipped while the others still apply.
 The format is taught to the model via a built-in system prompt prepended on
 every request. Anything you pass with `--system` is appended after it.
 
+## Git integration
+
+When yargent is run inside a git repo, every batch of successful edits is
+auto-committed in one commit per chat turn:
+
+```
+yargent: <first line of your prompt, trimmed to 60 chars>
+
+Files:
+- src/main.rs
+
+Yargent-Edit: yes
+```
+
+The `Yargent-Edit: yes` trailer is what makes `/undo` safe: it does a
+`git reset --hard HEAD~1` only when the current HEAD carries the trailer.
+Any manual commit you make on top of yargent's auto-commits won't be touched
+by `/undo` — you'd unwind those with `git reset` yourself.
+
+Only paths yargent actually touched are staged (no `git add -A`), so dirty
+files elsewhere in the working tree stay out of the commit. Caveat: if you
+had unstaged changes to a file *before* yargent edited it, those changes get
+folded into yargent's auto-commit and would be lost on `/undo`. Commit or
+stash before letting yargent change a file you've been editing manually.
+
+Outside a git repo (or if `git` isn't on `PATH`) auto-commit silently
+disables itself and the rest of yargent works as normal.
+
+### Why subprocess, not `gix`?
+
+We shell out to the system `git` binary rather than linking a Rust git library:
+
+- `git2` would pull in libgit2 (C) — exactly the kind of native dep we want
+  to avoid on Termux/Android.
+- `gix` is pure Rust but its write-side API (commit, reset) is still
+  maturing and would be substantially more code than its read side.
+- `git` is already a prerequisite for any project a user would point
+  yargent at, and is one line to install in Termux (`pkg install git`).
+
+Subprocess overhead is invisible at human-latency. Worth revisiting if we
+ever need to embed yargent somewhere without a git binary on PATH.
+
 ## Building on Termux (Android)
 
 ```bash
@@ -138,7 +180,8 @@ src/
 ├── provider.rs   LLMProvider trait + OpenAI-compatible + Anthropic backends
 ├── chat.rs       Interactive REPL with slash commands and file context
 ├── files.rs      FileContext: tracks added paths, renders them for the model
-└── edit.rs       SEARCH/REPLACE parser, applier, diff preview, system prompt
+├── edit.rs       SEARCH/REPLACE parser, applier, diff preview, system prompt
+└── git.rs        Repo discovery + auto-commit + /undo via subprocess git
 ```
 
 ### The core trait

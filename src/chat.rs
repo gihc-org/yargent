@@ -5,6 +5,7 @@
 //! history vector, scan for SEARCH/REPLACE edits, repeat. Slash-prefixed lines
 //! (`/help`, `/add`, etc.) are intercepted before they reach the model.
 
+use std::collections::BTreeSet;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
@@ -15,6 +16,7 @@ use tiktoken_rs::CoreBPE;
 
 use crate::edit::{self, EditOutcome};
 use crate::files::FileContext;
+use crate::git::Repo;
 use crate::provider::{LLMProvider, Message};
 
 /// Run the interactive chat loop until the user exits with `/quit` or Ctrl-D.
@@ -24,7 +26,10 @@ use crate::provider::{LLMProvider, Message};
 /// `~/.local/share/yargent/history`.
 pub async fn run_chat(provider: Box<dyn LLMProvider>, system: Option<String>) -> Result<()> {
     let tokenizer = tiktoken_rs::cl100k_base()?;
-    let mut state = ChatState::new(system, tokenizer);
+    let repo = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| Repo::discover(&cwd));
+    let mut state = ChatState::new(system, tokenizer, repo);
 
     let mut rl = rustyline::DefaultEditor::new()?;
     let history_path = history_file_path();
@@ -35,7 +40,11 @@ pub async fn run_chat(provider: Box<dyn LLMProvider>, system: Option<String>) ->
         let _ = rl.load_history(p);
     }
 
-    println!("yargent — type /help for commands, Ctrl-D to quit");
+    match &state.repo {
+        Some(r) => println!("yargent — git repo at {}", r.root().display()),
+        None => println!("yargent — no git repo (auto-commit disabled)"),
+    }
+    println!("type /help for commands, Ctrl-D to quit");
 
     loop {
         // rustyline's readline is synchronous and blocks the thread waiting
@@ -76,10 +85,29 @@ pub async fn run_chat(provider: Box<dyn LLMProvider>, system: Option<String>) ->
 
         match stream_response(&*provider, &outgoing).await {
             Ok(full) => {
-                // Parse and offer edits *before* pushing to history so the diff
-                // output doesn't scroll away with the model's prose.
-                if let Err(e) = handle_edits(&full) {
-                    eprintln!("edit handling error: {e:#}");
+                // Parse and offer edits *before* pushing the assistant message
+                // to history, so the diff output doesn't scroll away with the
+                // model's prose.
+                let applied = match handle_edits(&full) {
+                    Ok(paths) => paths,
+                    Err(e) => {
+                        eprintln!("edit handling error: {e:#}");
+                        Vec::new()
+                    }
+                };
+                if !applied.is_empty()
+                    && let Some(repo) = state.repo.as_ref()
+                {
+                    let prompt = state
+                        .history
+                        .last()
+                        .map(|m| m.content.as_str())
+                        .unwrap_or("");
+                    let msg = crate::git::build_commit_message(prompt, &applied);
+                    match repo.commit_paths(&applied, &msg) {
+                        Ok(sha) => println!("  ✓ committed {}", &sha[..7.min(sha.len())]),
+                        Err(e) => eprintln!("  ✗ auto-commit failed: {e:#}"),
+                    }
                 }
                 state.history.push(Message::assistant(full));
             }
@@ -113,15 +141,19 @@ struct ChatState {
     /// BPE tokenizer used for `/tokens` estimates. Loaded once; the merge
     /// tables are bundled into the binary so this never touches the network.
     tokenizer: CoreBPE,
+    /// Discovered git working tree, if cwd is inside one. `None` disables
+    /// auto-commit and `/undo`.
+    repo: Option<Repo>,
 }
 
 impl ChatState {
-    fn new(user_system: Option<String>, tokenizer: CoreBPE) -> Self {
+    fn new(user_system: Option<String>, tokenizer: CoreBPE, repo: Option<Repo>) -> Self {
         Self {
             user_system,
             history: Vec::new(),
             files: FileContext::new(),
             tokenizer,
+            repo,
         }
     }
 
@@ -185,19 +217,21 @@ async fn stream_response(provider: &dyn LLMProvider, messages: &[Message]) -> Re
 }
 
 /// Scan the model's reply for SEARCH/REPLACE blocks and walk the user through
-/// approving each one.
+/// approving each one. Returns the deduped, sorted set of paths that were
+/// successfully written — the caller uses this list for auto-commit.
 ///
-/// Returns Ok even when individual edits fail to apply — the loop reports each
-/// outcome inline so the user can react in the next turn. Only IO errors from
-/// the prompt itself bubble up as Err.
-fn handle_edits(reply: &str) -> Result<()> {
+/// Individual edit failures (SEARCH not found, ambiguous match) are reported
+/// inline and skipped. Only IO errors on the confirmation prompt itself bubble
+/// up as `Err`.
+fn handle_edits(reply: &str) -> Result<Vec<PathBuf>> {
     let edits = edit::parse_edits(reply);
     if edits.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     println!("\n--- {} edit(s) suggested ---", edits.len());
 
+    let mut applied: BTreeSet<PathBuf> = BTreeSet::new();
     let mut auto_apply_rest = false;
     for (i, e) in edits.iter().enumerate() {
         println!("\n[{}/{}] {}", i + 1, edits.len(), e.path.display());
@@ -217,7 +251,7 @@ fn handle_edits(reply: &str) -> Result<()> {
                 }
                 "q" | "Q" | "quit" => {
                     println!("(remaining {} edit(s) skipped)", edits.len() - i);
-                    return Ok(());
+                    return Ok(applied.into_iter().collect());
                 }
                 _ => false,
             }
@@ -229,8 +263,18 @@ fn handle_edits(reply: &str) -> Result<()> {
         }
 
         match edit::apply_edit(e) {
-            Ok(EditOutcome::Applied) => println!("  ✓ applied"),
-            Ok(EditOutcome::Created) => println!("  ✓ created"),
+            Ok(EditOutcome::Applied) => {
+                println!("  ✓ applied");
+                if let Ok(canon) = e.path.canonicalize() {
+                    applied.insert(canon);
+                }
+            }
+            Ok(EditOutcome::Created) => {
+                println!("  ✓ created");
+                if let Ok(canon) = e.path.canonicalize() {
+                    applied.insert(canon);
+                }
+            }
             Ok(EditOutcome::NotFound) => {
                 eprintln!("  ✗ SEARCH text not found in {}", e.path.display());
             }
@@ -243,7 +287,7 @@ fn handle_edits(reply: &str) -> Result<()> {
             Err(err) => eprintln!("  ✗ {err:#}"),
         }
     }
-    Ok(())
+    Ok(applied.into_iter().collect())
 }
 
 fn prompt_line(msg: &str) -> Result<String> {
@@ -315,6 +359,23 @@ fn handle_slash(cmd: &str, state: &mut ChatState) -> bool {
             let n = state.token_estimate();
             println!("[~{n} tokens in next request (cl100k_base estimate)]");
         }
+        "undo" => {
+            let Some(repo) = state.repo.as_ref() else {
+                println!("[no git repo — nothing to undo]");
+                return false;
+            };
+            if !repo.head_is_yargent_commit() {
+                println!("[HEAD is not a yargent commit — refusing to undo]");
+                println!(
+                    "(only yargent's auto-commits can be rolled back; any manual commits at HEAD must be undone with git directly)"
+                );
+                return false;
+            }
+            match repo.reset_to_parent() {
+                Ok(sha) => println!("[undone — dropped {}]", &sha[..7.min(sha.len())]),
+                Err(e) => println!("error: {e:#}"),
+            }
+        }
         "help" | "?" => print_help(),
         _ => println!("unknown command: /{cmd}  (try /help)"),
     }
@@ -327,6 +388,7 @@ fn print_help() {
     println!("  /drop <path> [path...]  stop sharing files");
     println!("  /files                  list currently shared files");
     println!("  /tokens                 estimate tokens in next request");
+    println!("  /undo                   roll back the most recent yargent auto-commit");
     println!("  /clear                  clear chat history (system + files preserved)");
     println!("  /history                print full conversation");
     println!("  /help                   show this help");
@@ -335,6 +397,8 @@ fn print_help() {
     println!("editing:");
     println!("  When the model proposes edits as SEARCH/REPLACE blocks, yargent");
     println!("  shows a unified diff and prompts y/n/a/q before applying.");
+    println!("  Successful edits are auto-committed in one git commit per turn");
+    println!("  when run inside a git repo.");
 }
 
 fn history_file_path() -> Option<PathBuf> {
