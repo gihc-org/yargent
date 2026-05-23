@@ -16,6 +16,7 @@ mod edit;
 mod files;
 mod git;
 mod provider;
+mod repomap;
 use provider::{AnthropicProvider, LLMProvider, Message, OpenAICompatProvider};
 
 #[derive(Parser)]

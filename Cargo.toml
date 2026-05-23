@@ -42,3 +42,17 @@ tiktoken-rs = "0.11"
 # Pure-Rust; we use its unified-diff output and colorize the +/- lines with
 # raw ANSI escapes (no terminal-color crate dependency).
 similar = "3"
+
+# Tree-sitter + per-language grammars for the repo map. Tree-sitter itself is
+# C, and each grammar crate compiles a C parser via its build.rs. We accept
+# this native build dependency (Termux: `pkg install clang`) because the
+# alternative — running a separate parser per language — is much more code
+# and tree-sitter's parsers are notoriously portable.
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+
+# .gitignore-aware file enumeration. Pure-Rust, from the ripgrep ecosystem.
+ignore = "0.4"

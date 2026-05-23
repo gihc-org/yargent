@@ -5,7 +5,7 @@
 //! history vector, scan for SEARCH/REPLACE edits, repeat. Slash-prefixed lines
 //! (`/help`, `/add`, etc.) are intercepted before they reach the model.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
@@ -18,6 +18,11 @@ use crate::edit::{self, EditOutcome};
 use crate::files::FileContext;
 use crate::git::Repo;
 use crate::provider::{LLMProvider, Message};
+use crate::repomap::RepoMap;
+
+/// How many tokens of repo-map text we're willing to spend per request. The
+/// rendered map is truncated to fit; lowest-PageRanked files drop first.
+const MAP_TOKEN_BUDGET: usize = 1024;
 
 /// Run the interactive chat loop until the user exits with `/quit` or Ctrl-D.
 ///
@@ -29,7 +34,26 @@ pub async fn run_chat(provider: Box<dyn LLMProvider>, system: Option<String>) ->
     let repo = std::env::current_dir()
         .ok()
         .and_then(|cwd| Repo::discover(&cwd));
-    let mut state = ChatState::new(system, tokenizer, repo);
+
+    // Build the repo map up-front. For typical repo sizes this is a couple
+    // hundred ms; for very large repos (10k+ files) it can be several seconds,
+    // hence the progress line.
+    let map_root = repo
+        .as_ref()
+        .map(|r| r.root().to_path_buf())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    print!("yargent — scanning {}... ", map_root.display());
+    io::stdout().flush().ok();
+    let map_start = std::time::Instant::now();
+    let repomap = RepoMap::build(&map_root);
+    println!(
+        "({} source file(s), {:.1}s)",
+        repomap.len(),
+        map_start.elapsed().as_secs_f32()
+    );
+
+    let mut state = ChatState::new(system, tokenizer, repo, repomap);
 
     let mut rl = rustyline::DefaultEditor::new()?;
     let history_path = history_file_path();
@@ -41,8 +65,8 @@ pub async fn run_chat(provider: Box<dyn LLMProvider>, system: Option<String>) ->
     }
 
     match &state.repo {
-        Some(r) => println!("yargent — git repo at {}", r.root().display()),
-        None => println!("yargent — no git repo (auto-commit disabled)"),
+        Some(r) => println!("git repo: {}", r.root().display()),
+        None => println!("no git repo (auto-commit disabled)"),
     }
     println!("type /help for commands, Ctrl-D to quit");
 
@@ -144,16 +168,29 @@ struct ChatState {
     /// Discovered git working tree, if cwd is inside one. `None` disables
     /// auto-commit and `/undo`.
     repo: Option<Repo>,
+    /// PageRank-ranked symbol overview of the repo. Built once at startup; can
+    /// be rebuilt via `/map-rebuild` if files change significantly.
+    repomap: RepoMap,
+    /// Whether to inject the rendered repo map on each outgoing request.
+    /// Toggled with `/map-on` / `/map-off`.
+    map_enabled: bool,
 }
 
 impl ChatState {
-    fn new(user_system: Option<String>, tokenizer: CoreBPE, repo: Option<Repo>) -> Self {
+    fn new(
+        user_system: Option<String>,
+        tokenizer: CoreBPE,
+        repo: Option<Repo>,
+        repomap: RepoMap,
+    ) -> Self {
         Self {
             user_system,
             history: Vec::new(),
             files: FileContext::new(),
             tokenizer,
             repo,
+            repomap,
+            map_enabled: true,
         }
     }
 
@@ -162,11 +199,14 @@ impl ChatState {
     /// Layout:
     /// 1. yargent's coding system prompt, with the user's `--system` appended
     ///    if one was supplied.
-    /// 2. (optional) synthetic user message with `/add`ed file contents, plus
-    ///    a one-line assistant acknowledgement — only when files are present.
+    /// 2. (optional) synthetic context message bundling repo map (top of
+    ///    file) + `/add`ed file contents (below), plus a one-line assistant
+    ///    acknowledgement. The bundle is only emitted when at least one
+    ///    component is non-empty.
     /// 3. The actual user/assistant history.
     ///
-    /// Step 2 is regenerated every turn so file edits propagate, and never
+    /// Step 2 is regenerated every turn so file edits propagate and the repo
+    /// map's personalization tracks the current `/add` set. None of it ever
     /// appears in `self.history`.
     fn build_outgoing(&self) -> Result<Vec<Message>> {
         let mut out = Vec::with_capacity(self.history.len() + 3);
@@ -178,10 +218,31 @@ impl ChatState {
         }
         out.push(Message::system(sys));
 
+        // Build the synthetic context: repo map first (gives the model a
+        // high-level overview), then the verbatim contents of /add'ed files.
+        let focused_paths: HashSet<PathBuf> = self.files.paths().cloned().collect();
+        let mut context = String::new();
+
+        if self.map_enabled && !self.repomap.is_empty() {
+            let rendered =
+                self.repomap
+                    .render(&focused_paths, MAP_TOKEN_BUDGET, &self.tokenizer);
+            if !rendered.is_empty() {
+                context.push_str(&rendered);
+                if !context.ends_with('\n') {
+                    context.push('\n');
+                }
+                context.push('\n');
+            }
+        }
+
         if !self.files.is_empty() {
-            let rendered = self.files.render()?;
-            out.push(Message::user(rendered));
-            out.push(Message::assistant("Got it. I'll work with those files."));
+            context.push_str(&self.files.render()?);
+        }
+
+        if !context.is_empty() {
+            out.push(Message::user(context));
+            out.push(Message::assistant("Got it. I'll use this context."));
         }
 
         out.extend_from_slice(&self.history);
@@ -359,6 +420,43 @@ fn handle_slash(cmd: &str, state: &mut ChatState) -> bool {
             let n = state.token_estimate();
             println!("[~{n} tokens in next request (cl100k_base estimate)]");
         }
+        "map" => {
+            if state.repomap.is_empty() {
+                println!("[repo map is empty — no source files detected]");
+                return false;
+            }
+            let focused: HashSet<PathBuf> = state.files.paths().cloned().collect();
+            let rendered =
+                state
+                    .repomap
+                    .render(&focused, MAP_TOKEN_BUDGET, &state.tokenizer);
+            print!("{rendered}");
+        }
+        "map-on" => {
+            state.map_enabled = true;
+            println!("[repo map injection enabled]");
+        }
+        "map-off" => {
+            state.map_enabled = false;
+            println!("[repo map injection disabled]");
+        }
+        "map-rebuild" => {
+            let root = state
+                .repo
+                .as_ref()
+                .map(|r| r.root().to_path_buf())
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from("."));
+            print!("[rebuilding map at {}... ", root.display());
+            io::stdout().flush().ok();
+            let start = std::time::Instant::now();
+            state.repomap = crate::repomap::RepoMap::build(&root);
+            println!(
+                "{} files, {:.1}s]",
+                state.repomap.len(),
+                start.elapsed().as_secs_f32()
+            );
+        }
         "undo" => {
             let Some(repo) = state.repo.as_ref() else {
                 println!("[no git repo — nothing to undo]");
@@ -388,6 +486,9 @@ fn print_help() {
     println!("  /drop <path> [path...]  stop sharing files");
     println!("  /files                  list currently shared files");
     println!("  /tokens                 estimate tokens in next request");
+    println!("  /map                    print the current repo map");
+    println!("  /map-on /map-off        toggle injecting the map on each turn");
+    println!("  /map-rebuild            re-walk and re-parse the repo");
     println!("  /undo                   roll back the most recent yargent auto-commit");
     println!("  /clear                  clear chat history (system + files preserved)");
     println!("  /history                print full conversation");

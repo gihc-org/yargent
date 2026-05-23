@@ -16,7 +16,7 @@ Learning project, built in phases. Each phase ends with something usable.
 | 2 | File context (`/add foo.rs`, `/drop`, token counts) | ✅ done |
 | 3 | File editing (SEARCH/REPLACE blocks, diff preview) | ✅ done |
 | 4 | Git integration (auto-commit, `/undo`) | ✅ done |
-| 5 | Tree-sitter repo map (PageRank over symbol graph) | ⬜ planned |
+| 5 | Tree-sitter repo map (PageRank over symbol graph) | ✅ done |
 | 6 | Config file, multi-provider polish | ⬜ planned |
 
 ## Quickstart
@@ -145,6 +145,42 @@ stash before letting yargent change a file you've been editing manually.
 Outside a git repo (or if `git` isn't on `PATH`) auto-commit silently
 disables itself and the rest of yargent works as normal.
 
+## Repo map
+
+When yargent starts it walks the repo (`.gitignore` respected), parses every
+source file it recognizes with tree-sitter, and builds a PageRank-ranked map
+of the symbols defined in each file. That map is then injected into every
+request alongside any `/add`ed file contents, giving the model a compact
+overview of what exists in the codebase without having to see every file in
+full.
+
+```
+Repo map (PageRank-ranked symbols from files not in the chat):
+src/provider.rs:
+  Message, LLMProvider, OpenAICompatProvider, AnthropicProvider, ...
+src/chat.rs:
+  run_chat, ChatState, build_outgoing, handle_edits, ...
+...
+```
+
+Files you have `/add`ed are *excluded* from the map (the model sees their
+full contents elsewhere) but their presence biases the PageRank
+personalization vector toward neighbouring files — so the map foregrounds
+what's related to your current focus.
+
+Languages currently parsed: **Rust, Python, JavaScript, TypeScript**. Adding
+another language is three lines in `src/repomap.rs::Language` plus a query
+pair. Files in unrecognized languages are silently skipped.
+
+The rendered map is capped at ~1024 tokens; lowest-ranked files fall off the
+end first.
+
+Slash commands:
+
+- `/map` — print the current rendered map
+- `/map-on` / `/map-off` — toggle injection on each request
+- `/map-rebuild` — re-walk and re-parse the repo
+
 ### Why subprocess, not `gix`?
 
 We shell out to the system `git` binary rather than linking a Rust git library:
@@ -169,8 +205,15 @@ cargo build --release
 ```
 
 Expect a slow first build (~5–15 min on a phone, depending on the device).
-Subsequent rebuilds are seconds. The binary is fully self-contained — no
-Python, no glibc-only libraries, no openssl. Just bionic libc and the kernel.
+Subsequent rebuilds are seconds. The binary links bionic libc and the kernel,
+plus the small C parsers tree-sitter compiles from its grammar crates — no
+Python, no openssl, no libgit2, nothing that historically broke on Termux.
+
+You'll need `clang` available for the tree-sitter grammars to build:
+
+```bash
+pkg install rust git clang
+```
 
 ## Architecture
 
@@ -181,7 +224,8 @@ src/
 ├── chat.rs       Interactive REPL with slash commands and file context
 ├── files.rs      FileContext: tracks added paths, renders them for the model
 ├── edit.rs       SEARCH/REPLACE parser, applier, diff preview, system prompt
-└── git.rs        Repo discovery + auto-commit + /undo via subprocess git
+├── git.rs        Repo discovery + auto-commit + /undo via subprocess git
+└── repomap.rs    Tree-sitter walker + PageRank symbol map injection
 ```
 
 ### The core trait
@@ -237,8 +281,10 @@ builds painful, and it also keeps cross-compilation simple.
 | `dirs` | XDG paths | Cross-platform `~/.local/share/...` resolution. |
 | `tiktoken-rs` | Token counting | Pure-Rust BPE, bundles its own merge tables. `cl100k_base` is exact for OpenAI and a close estimate for DeepSeek/Anthropic. |
 | `similar` | Diff rendering | Pure-Rust. We use `TextDiff::from_lines` for the unified-diff preview shown before applying edits. ANSI colors are bare escape sequences, no extra terminal crate. |
+| `tree-sitter` + grammars | Repo-map parsing | C-based but small and notoriously portable. Grammar crates compile their own C parser via `build.rs`; on Termux this needs `pkg install clang`. |
+| `ignore` | File walker | From the ripgrep ecosystem. Pure-Rust. Respects `.gitignore` so the map doesn't drown in `target/` and `node_modules/`. |
 
-Direct deps: 13. Indirect: ~155 (normal for an async networking app).
+Direct deps: 19. Indirect: ~170 (normal for an async networking app with parsers).
 
 ## Rust concepts in this codebase
 
