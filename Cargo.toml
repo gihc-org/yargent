@@ -37,3 +37,8 @@ dirs = "6.0.0"
 # estimate for DeepSeek/Anthropic (the real tokenizers are private but token
 # counts come out within ~10% in practice for code and English).
 tiktoken-rs = "0.11"
+
+# Diff library used to preview SEARCH/REPLACE edits before applying them.
+# Pure-Rust; we use its unified-diff output and colorize the +/- lines with
+# raw ANSI escapes (no terminal-color crate dependency).
+similar = "3"

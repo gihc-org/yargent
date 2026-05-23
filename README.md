@@ -14,7 +14,7 @@ Learning project, built in phases. Each phase ends with something usable.
 | 1 | Streaming, chat REPL, slash commands, persistent history | ✅ done |
 | 1.5 | Anthropic provider (Claude) alongside OpenAI-compat | ✅ done |
 | 2 | File context (`/add foo.rs`, `/drop`, token counts) | ✅ done |
-| 3 | File editing (SEARCH/REPLACE blocks, diff preview) | ⬜ planned |
+| 3 | File editing (SEARCH/REPLACE blocks, diff preview) | ✅ done |
 | 4 | Git integration via `gix` (auto-commit, `/undo`) | ⬜ planned |
 | 5 | Tree-sitter repo map (PageRank over symbol graph) | ⬜ planned |
 | 6 | Config file, multi-provider polish | ⬜ planned |
@@ -75,6 +75,48 @@ Inside the chat REPL, type `/help` for the command list:
 Added files are re-read from disk every turn, so edits you make in another
 editor propagate without an explicit refresh.
 
+## File editing (SEARCH/REPLACE)
+
+When you ask the model to change code, it emits edits in this format:
+
+````text
+src/main.rs
+<<<<<<< SEARCH
+fn old() {}
+=======
+fn new() {}
+>>>>>>> REPLACE
+````
+
+yargent parses every block, shows a colorized unified diff for each, and
+prompts before touching disk:
+
+```
+--- 2 edit(s) suggested ---
+
+[1/2] src/main.rs
+--- src/main.rs
++++ src/main.rs
+ fn main() {
+-    println!("hello");
++    println!("hello, world");
+ }
+apply? [y]es / [n]o / [a]ll / [q]uit-prompt:
+```
+
+- `y` applies this one edit
+- `n` skips it
+- `a` applies this one and auto-applies every remaining edit in the batch
+- `q` skips all remaining edits in the batch
+
+An empty SEARCH section means "create a new file" — yargent refuses to
+overwrite existing files this way, so you can't lose work to a mis-formatted
+block. If the SEARCH text doesn't appear in the file (or appears more than
+once), that edit is reported and skipped while the others still apply.
+
+The format is taught to the model via a built-in system prompt prepended on
+every request. Anything you pass with `--system` is appended after it.
+
 ## Building on Termux (Android)
 
 ```bash
@@ -95,7 +137,8 @@ src/
 ├── main.rs       CLI parsing and dispatch
 ├── provider.rs   LLMProvider trait + OpenAI-compatible + Anthropic backends
 ├── chat.rs       Interactive REPL with slash commands and file context
-└── files.rs      FileContext: tracks added paths, renders them for the model
+├── files.rs      FileContext: tracks added paths, renders them for the model
+└── edit.rs       SEARCH/REPLACE parser, applier, diff preview, system prompt
 ```
 
 ### The core trait
@@ -150,8 +193,9 @@ builds painful, and it also keeps cross-compilation simple.
 | `rustyline` | REPL line editing | Arrow keys, history file, Ctrl-R search. |
 | `dirs` | XDG paths | Cross-platform `~/.local/share/...` resolution. |
 | `tiktoken-rs` | Token counting | Pure-Rust BPE, bundles its own merge tables. `cl100k_base` is exact for OpenAI and a close estimate for DeepSeek/Anthropic. |
+| `similar` | Diff rendering | Pure-Rust. We use `TextDiff::from_lines` for the unified-diff preview shown before applying edits. ANSI colors are bare escape sequences, no extra terminal crate. |
 
-Direct deps: 12. Indirect: ~155 (normal for an async networking app).
+Direct deps: 13. Indirect: ~155 (normal for an async networking app).
 
 ## Rust concepts in this codebase
 

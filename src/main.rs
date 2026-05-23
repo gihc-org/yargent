@@ -12,6 +12,7 @@ use clap::Parser;
 use futures_util::StreamExt;
 
 mod chat;
+mod edit;
 mod files;
 mod provider;
 use provider::{AnthropicProvider, LLMProvider, Message, OpenAICompatProvider};

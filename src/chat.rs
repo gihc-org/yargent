@@ -2,10 +2,10 @@
 //!
 //! Drives a turn-by-turn conversation with the LLM: read a line from the user
 //! via [`rustyline`], stream the model's reply to stdout, push both into the
-//! history vector, repeat. Slash-prefixed lines (`/help`, `/clear`, `/add`,
-//! etc.) are intercepted before they reach the model.
+//! history vector, scan for SEARCH/REPLACE edits, repeat. Slash-prefixed lines
+//! (`/help`, `/add`, etc.) are intercepted before they reach the model.
 
-use std::io::Write;
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -13,13 +13,15 @@ use futures_util::StreamExt;
 use rustyline::error::ReadlineError;
 use tiktoken_rs::CoreBPE;
 
+use crate::edit::{self, EditOutcome};
 use crate::files::FileContext;
 use crate::provider::{LLMProvider, Message};
 
 /// Run the interactive chat loop until the user exits with `/quit` or Ctrl-D.
 ///
-/// `system`, if provided, is pushed as the first message and preserved across
-/// `/clear`. Line-edit history persists to `~/.local/share/yargent/history`.
+/// `system`, if provided, is concatenated *after* yargent's built-in coding
+/// system prompt. Line-edit history persists to
+/// `~/.local/share/yargent/history`.
 pub async fn run_chat(provider: Box<dyn LLMProvider>, system: Option<String>) -> Result<()> {
     let tokenizer = tiktoken_rs::cl100k_base()?;
     let mut state = ChatState::new(system, tokenizer);
@@ -73,7 +75,14 @@ pub async fn run_chat(provider: Box<dyn LLMProvider>, system: Option<String>) ->
         };
 
         match stream_response(&*provider, &outgoing).await {
-            Ok(full) => state.history.push(Message::assistant(full)),
+            Ok(full) => {
+                // Parse and offer edits *before* pushing to history so the diff
+                // output doesn't scroll away with the model's prose.
+                if let Err(e) = handle_edits(&full) {
+                    eprintln!("edit handling error: {e:#}");
+                }
+                state.history.push(Message::assistant(full));
+            }
             Err(e) => {
                 eprintln!("\nerror: {e:#}");
                 state.history.pop();
@@ -92,8 +101,12 @@ pub async fn run_chat(provider: Box<dyn LLMProvider>, system: Option<String>) ->
 /// Pulled out into a struct so `handle_slash` can borrow it mutably as a whole
 /// rather than juggling N parallel `&mut` borrows.
 struct ChatState {
-    /// User/assistant/system turns as the user sees them — clean, never
-    /// polluted by injected file content or other synthetic messages.
+    /// User-supplied `--system` text, kept separate from `history` so that
+    /// `/clear` doesn't touch it and so we can prepend yargent's built-in
+    /// system prompt to it in `build_outgoing`.
+    user_system: Option<String>,
+    /// User/assistant turns only — no system messages, no synthetic injections.
+    /// This is the clean record of what the user typed.
     history: Vec<Message>,
     /// Files the user has shared with `/add`. Re-read on every turn.
     files: FileContext,
@@ -103,13 +116,10 @@ struct ChatState {
 }
 
 impl ChatState {
-    fn new(system: Option<String>, tokenizer: CoreBPE) -> Self {
-        let mut history = Vec::new();
-        if let Some(sys) = system {
-            history.push(Message::system(sys));
-        }
+    fn new(user_system: Option<String>, tokenizer: CoreBPE) -> Self {
         Self {
-            history,
+            user_system,
+            history: Vec::new(),
             files: FileContext::new(),
             tokenizer,
         }
@@ -117,34 +127,32 @@ impl ChatState {
 
     /// Build the actual list of messages to send to the provider this turn.
     ///
-    /// If any files have been `/add`ed, splice in a synthetic user message
-    /// containing their current contents plus a one-line assistant
-    /// acknowledgement, placed *after* the system prompt but *before* the
-    /// rest of the conversation. The injection is regenerated every turn so
-    /// edits propagate, and it never appears in `self.history` — that stays
-    /// the clean record of what the user actually typed.
+    /// Layout:
+    /// 1. yargent's coding system prompt, with the user's `--system` appended
+    ///    if one was supplied.
+    /// 2. (optional) synthetic user message with `/add`ed file contents, plus
+    ///    a one-line assistant acknowledgement — only when files are present.
+    /// 3. The actual user/assistant history.
+    ///
+    /// Step 2 is regenerated every turn so file edits propagate, and never
+    /// appears in `self.history`.
     fn build_outgoing(&self) -> Result<Vec<Message>> {
-        if self.files.is_empty() {
-            return Ok(self.history.clone());
+        let mut out = Vec::with_capacity(self.history.len() + 3);
+
+        let mut sys = String::from(edit::SYSTEM_PROMPT);
+        if let Some(ref user_sys) = self.user_system {
+            sys.push_str("\n\n");
+            sys.push_str(user_sys);
+        }
+        out.push(Message::system(sys));
+
+        if !self.files.is_empty() {
+            let rendered = self.files.render()?;
+            out.push(Message::user(rendered));
+            out.push(Message::assistant("Got it. I'll work with those files."));
         }
 
-        let rendered = self.files.render()?;
-        let mut out = Vec::with_capacity(self.history.len() + 2);
-
-        // System messages (if any) stay at the very front. By convention there
-        // is at most one, but we handle multiple defensively.
-        let split_at = self
-            .history
-            .iter()
-            .position(|m| m.role != "system")
-            .unwrap_or(self.history.len());
-
-        out.extend_from_slice(&self.history[..split_at]);
-        out.push(Message::user(rendered));
-        out.push(Message::assistant(
-            "Got it. I'll work with those files.",
-        ));
-        out.extend_from_slice(&self.history[split_at..]);
+        out.extend_from_slice(&self.history);
         Ok(out)
     }
 
@@ -165,7 +173,7 @@ impl ChatState {
 async fn stream_response(provider: &dyn LLMProvider, messages: &[Message]) -> Result<String> {
     let mut stream = provider.complete_stream(messages).await?;
     let mut full = String::new();
-    let mut stdout = std::io::stdout();
+    let mut stdout = io::stdout();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         print!("{chunk}");
@@ -174,6 +182,77 @@ async fn stream_response(provider: &dyn LLMProvider, messages: &[Message]) -> Re
     }
     println!();
     Ok(full)
+}
+
+/// Scan the model's reply for SEARCH/REPLACE blocks and walk the user through
+/// approving each one.
+///
+/// Returns Ok even when individual edits fail to apply — the loop reports each
+/// outcome inline so the user can react in the next turn. Only IO errors from
+/// the prompt itself bubble up as Err.
+fn handle_edits(reply: &str) -> Result<()> {
+    let edits = edit::parse_edits(reply);
+    if edits.is_empty() {
+        return Ok(());
+    }
+
+    println!("\n--- {} edit(s) suggested ---", edits.len());
+
+    let mut auto_apply_rest = false;
+    for (i, e) in edits.iter().enumerate() {
+        println!("\n[{}/{}] {}", i + 1, edits.len(), e.path.display());
+        print!("{}", edit::render_diff(e));
+
+        let approve = if auto_apply_rest {
+            true
+        } else {
+            let choice = tokio::task::block_in_place(|| {
+                prompt_line("apply? [y]es / [n]o / [a]ll / [q]uit-prompt: ")
+            })?;
+            match choice.trim() {
+                "y" | "Y" | "yes" => true,
+                "a" | "A" | "all" => {
+                    auto_apply_rest = true;
+                    true
+                }
+                "q" | "Q" | "quit" => {
+                    println!("(remaining {} edit(s) skipped)", edits.len() - i);
+                    return Ok(());
+                }
+                _ => false,
+            }
+        };
+
+        if !approve {
+            println!("  skipped");
+            continue;
+        }
+
+        match edit::apply_edit(e) {
+            Ok(EditOutcome::Applied) => println!("  ✓ applied"),
+            Ok(EditOutcome::Created) => println!("  ✓ created"),
+            Ok(EditOutcome::NotFound) => {
+                eprintln!("  ✗ SEARCH text not found in {}", e.path.display());
+            }
+            Ok(EditOutcome::Ambiguous(n)) => {
+                eprintln!(
+                    "  ✗ SEARCH text matches {n} places in {} — skipped",
+                    e.path.display()
+                );
+            }
+            Err(err) => eprintln!("  ✗ {err:#}"),
+        }
+    }
+    Ok(())
+}
+
+fn prompt_line(msg: &str) -> Result<String> {
+    let mut stdout = io::stdout();
+    stdout.write_all(msg.as_bytes())?;
+    stdout.flush()?;
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line)?;
+    Ok(line)
 }
 
 /// Dispatch a slash command. Returns true if the loop should exit.
@@ -189,7 +268,7 @@ fn handle_slash(cmd: &str, state: &mut ChatState) -> bool {
     match head {
         "q" | "quit" | "exit" => return true,
         "clear" => {
-            state.history.retain(|m| m.role == "system");
+            state.history.clear();
             println!("[history cleared]");
         }
         "history" => {
@@ -252,6 +331,10 @@ fn print_help() {
     println!("  /history                print full conversation");
     println!("  /help                   show this help");
     println!("  /quit                   exit (or Ctrl-D)");
+    println!();
+    println!("editing:");
+    println!("  When the model proposes edits as SEARCH/REPLACE blocks, yargent");
+    println!("  shows a unified diff and prompts y/n/a/q before applying.");
 }
 
 fn history_file_path() -> Option<PathBuf> {
