@@ -19,30 +19,82 @@ Learning project, built in phases. Each phase ends with something usable.
 | 5 | Tree-sitter repo map (PageRank over symbol graph) | ✅ done |
 | 6 | Config file, custom providers, session flags | ✅ done |
 
-## Quickstart
+## Daily use
+
+Once installed (`cargo install --path .`) and your API key is in
+`~/.config/yargent/config.toml`, daily use is just:
+
+```bash
+cd /path/to/your/project
+yargent
+```
+
+That drops you into the chat REPL. Type your question, press Enter. The
+model streams a reply. If it proposes file edits, you'll see a colored
+diff and a `[y/n/a/q]` prompt — `y` applies one edit, `a` applies all in
+the batch, `n` skips, `q` aborts the remaining edits. Accepted edits are
+auto-committed to git in one commit per turn. `/undo` rolls back the
+most recent yargent commit.
+
+A few keystrokes worth remembering:
+
+```
+/help        list every command (in case you forgot)
+/add foo.rs  share a file with the model
+/files       show what's shared
+/map         print the repo overview
+/undo        roll back yargent's last auto-commit
+Ctrl-D       quit (same as /quit)
+```
+
+If `yargent` says "no API key for provider deepseek", your config file
+got moved or deleted. Recreate it:
+
+```bash
+mkdir -p ~/.config/yargent
+cat > ~/.config/yargent/config.toml << 'EOF'
+default_model = "deepseek/deepseek-chat"
+
+[providers.deepseek]
+api_key = "sk-YOUR-KEY-HERE"
+EOF
+chmod 600 ~/.config/yargent/config.toml
+```
+
+If `yargent` itself is "command not found", reinstall with
+`cargo install --path /home/kristian/projects/yargent` (or wherever you
+cloned it).
+
+## First-time setup (Quickstart)
 
 You need a Rust toolchain (`rustup` or `pkg install rust` on Termux) and an
 API key for an LLM provider.
 
 ```bash
-# DeepSeek is cheap and works well as a default
-export DEEPSEEK_API_KEY=sk-...
+# 1. Build and install yargent globally (~5–10 min first time)
+cargo install --path .
 
-# Build a release binary (~5.8 MB, no runtime dependencies)
-cargo build --release
+# 2. Stash your API key in the config file so you don't have to export
+#    it every shell. chmod 600 keeps it readable only by you.
+mkdir -p ~/.config/yargent
+cat > ~/.config/yargent/config.toml << 'EOF'
+default_model = "deepseek/deepseek-chat"
 
-# One-shot prompt
-./target/release/yargent "explain Rust lifetimes in 3 lines"
+[providers.deepseek]
+api_key = "sk-YOUR-KEY-HERE"
+EOF
+chmod 600 ~/.config/yargent/config.toml
 
-# Interactive chat — drops into a REPL
-./target/release/yargent
+# 3. Use it from anywhere
+yargent "explain Rust lifetimes in 3 lines"   # one-shot
+yargent                                        # interactive chat
 ```
 
 Override the model with `--model backend/model`:
 
 ```bash
-./target/release/yargent --model openai/gpt-4o-mini "..."
-./target/release/yargent --model anthropic/claude-sonnet-4-6 "..."
+yargent --model openai/gpt-4o-mini "..."
+yargent --model anthropic/claude-sonnet-4-6 "..."
 ```
 
 The backend prefix selects which `*_API_KEY` we read by default:
@@ -60,7 +112,7 @@ become first-class once they're listed under `[providers.X]`.
 Prepend a system prompt with `--system`:
 
 ```bash
-./target/release/yargent --system "Reply only in Danish" "what is async?"
+yargent --system "Reply only in Danish" "what is async?"
 ```
 
 Inside the chat REPL, type `/help` for the command list:
