@@ -13,7 +13,7 @@ Learning project, built in phases. Each phase ends with something usable.
 | 0 | One-shot CLI → LLM round-trip | ✅ done |
 | 1 | Streaming, chat REPL, slash commands, persistent history | ✅ done |
 | 1.5 | Anthropic provider (Claude) alongside OpenAI-compat | ✅ done |
-| 2 | File context (`/add foo.rs`, `/drop`, token counts) | ⬜ planned |
+| 2 | File context (`/add foo.rs`, `/drop`, token counts) | ✅ done |
 | 3 | File editing (SEARCH/REPLACE blocks, diff preview) | ⬜ planned |
 | 4 | Git integration via `gix` (auto-commit, `/undo`) | ⬜ planned |
 | 5 | Tree-sitter repo map (PageRank over symbol graph) | ⬜ planned |
@@ -59,7 +59,21 @@ Prepend a system prompt with `--system`:
 ./target/release/yargent --system "Reply only in Danish" "what is async?"
 ```
 
-Inside the chat REPL, type `/help` for the command list.
+Inside the chat REPL, type `/help` for the command list:
+
+```
+/add <path> [path...]   share files with the model
+/drop <path> [path...]  stop sharing files
+/files                  list currently shared files
+/tokens                 estimate tokens in next request
+/clear                  clear chat history (system + files preserved)
+/history                print full conversation
+/help                   show this help
+/quit                   exit (or Ctrl-D)
+```
+
+Added files are re-read from disk every turn, so edits you make in another
+editor propagate without an explicit refresh.
 
 ## Building on Termux (Android)
 
@@ -79,8 +93,9 @@ Python, no glibc-only libraries, no openssl. Just bionic libc and the kernel.
 ```
 src/
 ├── main.rs       CLI parsing and dispatch
-├── provider.rs   LLMProvider trait + OpenAI-compatible backend
-└── chat.rs       Interactive REPL with slash commands
+├── provider.rs   LLMProvider trait + OpenAI-compatible + Anthropic backends
+├── chat.rs       Interactive REPL with slash commands and file context
+└── files.rs      FileContext: tracks added paths, renders them for the model
 ```
 
 ### The core trait
@@ -134,8 +149,9 @@ builds painful, and it also keeps cross-compilation simple.
 | `async-stream` | `try_stream!` macro | Write streams in straight-line code with `yield`. |
 | `rustyline` | REPL line editing | Arrow keys, history file, Ctrl-R search. |
 | `dirs` | XDG paths | Cross-platform `~/.local/share/...` resolution. |
+| `tiktoken-rs` | Token counting | Pure-Rust BPE, bundles its own merge tables. `cl100k_base` is exact for OpenAI and a close estimate for DeepSeek/Anthropic. |
 
-Direct deps: 11. Indirect: ~150 (normal for an async networking app).
+Direct deps: 12. Indirect: ~155 (normal for an async networking app).
 
 ## Rust concepts in this codebase
 

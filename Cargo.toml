@@ -30,3 +30,10 @@ futures-util = "0.3.32"
 async-stream = "0.3.6"
 rustyline = "18.0.0"
 dirs = "6.0.0"
+
+# BPE tokenizer used for context-size estimates. Pure Rust, bundles its own
+# merge tables — no C deps, no network calls. We use `cl100k_base` as a
+# universal approximation; it's exact for OpenAI models and a reasonable
+# estimate for DeepSeek/Anthropic (the real tokenizers are private but token
+# counts come out within ~10% in practice for code and English).
+tiktoken-rs = "0.11"
