@@ -19,6 +19,7 @@ Learning project, built in phases. Each phase ends with something usable.
 | 5 | Tree-sitter repo map (PageRank over symbol graph) | ✅ done |
 | 6 | Config file, custom providers, session flags | ✅ done |
 | 6.5 | Auto-load convention files (AGENTS.md / CLAUDE.md / …) with `@`-reference following | ✅ done |
+| 6.6 | Multi-line REPL input (`{` / `}` blocks and backslash continuation) | ✅ done |
 
 ## Daily use
 
@@ -131,6 +132,32 @@ Inside the chat REPL, type `/help` for the command list:
 
 Added files are re-read from disk every turn, so edits you make in another
 editor propagate without an explicit refresh.
+
+### Multi-line input
+
+By default the chat REPL submits when you press Enter. To enter a
+multi-line prompt — pasting code, writing a longer instruction — use one
+of two triggers:
+
+- **Block mode**: a line containing only `{` opens a block. Following
+  Enter presses insert literal newlines into the buffer rather than
+  submitting. A line containing only `}` closes the block and submits.
+  The braces are passed to the model verbatim — they're usually
+  innocuous and sometimes a useful structure hint.
+- **Backslash continuation**: end a line with `\` (literal backslash)
+  to continue on the next line. Smaller hammer than block mode for
+  one-off two-line prompts.
+
+For block mode the brace must be alone on its line (with optional
+surrounding whitespace) — pasted code that happens to contain `{` or
+`}` won't accidentally trigger continuation.
+
+```
+> {
+fix the bug in src/main.rs and add a test
+that covers the empty-input case.
+}
+```
 
 ## File editing (SEARCH/REPLACE)
 

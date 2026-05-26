@@ -11,7 +11,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use futures_util::StreamExt;
+use rustyline::completion::Completer;
 use rustyline::error::ReadlineError;
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::history::FileHistory;
+use rustyline::validate::{ValidationContext, ValidationResult, Validator};
+use rustyline::{Editor, Helper};
 use tiktoken_rs::CoreBPE;
 
 use crate::edit::{self, EditOutcome};
@@ -115,7 +121,8 @@ pub async fn run_chat(
         }
     }
 
-    let mut rl = rustyline::DefaultEditor::new()?;
+    let mut rl: Editor<MultiLineHelper, FileHistory> = Editor::new()?;
+    rl.set_helper(Some(MultiLineHelper));
     let history_path = history_file_path();
     if let Some(ref p) = history_path {
         if let Some(parent) = p.parent() {
@@ -567,10 +574,143 @@ fn print_help() {
     println!("  shows a unified diff and prompts y/n/a/q before applying.");
     println!("  Successful edits are auto-committed in one git commit per turn");
     println!("  when run inside a git repo.");
+    println!();
+    println!("multi-line input:");
+    println!("  Type `{{` on its own line to open a block; `}}` on its own line");
+    println!("  closes and submits. Or end a line with `\\` to continue on the");
+    println!("  next line. Single-line input still submits on Enter as before.");
 }
 
 fn history_file_path() -> Option<PathBuf> {
     dirs::data_local_dir().map(|p| p.join("yargent").join("history"))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Multi-line input helper
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// rustyline's `Validator` trait is the official entry point for multi-line
+// input: each time the user presses Enter, rustyline asks the validator
+// whether the buffer is "complete." If we return `Incomplete`, rustyline
+// inserts a literal newline and lets the user keep typing; if `Valid`, the
+// line is submitted as one input string (with embedded newlines).
+//
+// We trigger continuation on two patterns:
+//
+//   - **Block input** (aider-style): a line that is *exactly* `{` (whitespace-
+//     trimmed) opens a multi-line block. A matching line of just `}` closes
+//     it. The constraint that the brace must be alone on its line keeps the
+//     parser from misfiring on pasted code that happens to contain braces.
+//
+//   - **Backslash continuation**: a line ending in `\` (literal backslash)
+//     continues to the next line, like shell. Useful for one-off line
+//     extensions without committing to a full block.
+//
+// Both markers stay in the submitted text — the model sees the braces and
+// trailing backslashes verbatim. They're harmless and arguably useful as
+// structure hints. If that becomes annoying we can post-process before
+// pushing to history.
+
+/// Empty struct implementing rustyline's `Helper` trait composite. The actual
+/// behavior is in [`Validator`]; completer/highlighter/hinter take their
+/// defaults (which do nothing).
+#[derive(Default)]
+struct MultiLineHelper;
+
+impl Helper for MultiLineHelper {}
+impl Completer for MultiLineHelper {
+    type Candidate = String;
+}
+impl Hinter for MultiLineHelper {
+    type Hint = String;
+}
+impl Highlighter for MultiLineHelper {}
+impl Validator for MultiLineHelper {
+    fn validate(&self, ctx: &mut ValidationContext) -> rustyline::Result<ValidationResult> {
+        if needs_continuation(ctx.input()) {
+            Ok(ValidationResult::Incomplete)
+        } else {
+            Ok(ValidationResult::Valid(None))
+        }
+    }
+}
+
+/// Decide whether `input` is still mid-multi-line and should accept another
+/// Enter as a newline rather than a submission. See module-level comment for
+/// the rules.
+fn needs_continuation(input: &str) -> bool {
+    let mut depth: i32 = 0;
+    for line in input.lines() {
+        match line.trim() {
+            "{" => depth += 1,
+            "}" => depth -= 1,
+            _ => {}
+        }
+    }
+    if depth > 0 {
+        return true;
+    }
+    matches!(input.lines().last(), Some(l) if l.ends_with('\\'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::needs_continuation;
+
+    #[test]
+    fn single_line_submits() {
+        assert!(!needs_continuation("hello"));
+        assert!(!needs_continuation(""));
+        assert!(!needs_continuation("/help"));
+    }
+
+    #[test]
+    fn open_block_requires_more_input() {
+        assert!(needs_continuation("{"));
+        assert!(needs_continuation("{\nsome stuff"));
+        assert!(needs_continuation("{\nline 1\nline 2"));
+    }
+
+    #[test]
+    fn balanced_block_submits() {
+        assert!(!needs_continuation("{\nstuff\n}"));
+        assert!(!needs_continuation("{\nline 1\nline 2\n}"));
+    }
+
+    #[test]
+    fn nested_blocks_track_depth() {
+        assert!(needs_continuation("{\n{\nstuff\n}"));
+        assert!(!needs_continuation("{\n{\nstuff\n}\n}"));
+    }
+
+    #[test]
+    fn braces_with_other_content_do_not_count() {
+        // A brace embedded in real content (pasted code) must NOT trigger
+        // block mode — only lines that are *exactly* `{` or `}` count.
+        assert!(!needs_continuation("fn foo() {"));
+        assert!(!needs_continuation("fn foo() {\nbar()\n}"));
+        assert!(!needs_continuation("{some text}"));
+    }
+
+    #[test]
+    fn brace_with_surrounding_whitespace_still_counts() {
+        // We trim before matching, so "  {  " is the same as "{".
+        assert!(needs_continuation("   {\nstuff"));
+        assert!(!needs_continuation("   {\nstuff\n   }   "));
+    }
+
+    #[test]
+    fn trailing_backslash_continues() {
+        assert!(needs_continuation("first line\\"));
+        assert!(needs_continuation("first\\\nsecond\\"));
+    }
+
+    #[test]
+    fn trailing_backslash_only_matters_on_last_line() {
+        // A backslash inside the input but not at the very end shouldn't
+        // hold up submission.
+        assert!(!needs_continuation("middle\\\nfinal line"));
+    }
 }
 
 /// Trim a path to just its filename for compact status lines. Falls back to
