@@ -54,8 +54,17 @@ impl FileContext {
             for entry in walker.flatten() {
                 let p = entry.path();
                 if p.is_file() {
-                    if let Ok(c) = p.canonicalize() {
-                        self.paths.insert(c);
+                    match p.canonicalize() {
+                        Ok(c) => {
+                            self.paths.insert(c);
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "warning: cannot canonicalize '{}' — {}",
+                                p.display(),
+                                e
+                            );
+                        }
                     }
                 }
             }
