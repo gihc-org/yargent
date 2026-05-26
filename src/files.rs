@@ -94,6 +94,10 @@ impl FileContext {
         self.paths.is_empty()
     }
 
+    pub fn len(&self) -> usize {
+        self.paths.len()
+    }
+
     pub fn paths(&self) -> impl Iterator<Item = &PathBuf> {
         self.paths.iter()
     }

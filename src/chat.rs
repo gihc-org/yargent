@@ -466,8 +466,20 @@ fn handle_slash(cmd: &str, state: &mut ChatState) -> bool {
                 println!("usage: /add <path> [path...]");
             } else {
                 for path in rest.split_whitespace() {
+                    // Snapshot the count before so we can report how many
+                    // new files a directory walk actually produced.
+                    // Re-adding the same dir yields "(0 files)" which is
+                    // the honest answer and helps spot mistakes.
+                    let before = state.files.len();
                     match state.files.add(path) {
-                        Ok(canon) => println!("[added {}]", canon.display()),
+                        Ok(canon) => {
+                            let added = state.files.len() - before;
+                            if canon.is_dir() {
+                                println!("[added {} ({} files)]", canon.display(), added);
+                            } else {
+                                println!("[added {}]", canon.display());
+                            }
+                        }
                         Err(e) => println!("error: {e:#}"),
                     }
                 }
