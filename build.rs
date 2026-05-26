@@ -1,10 +1,13 @@
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn main() {
     // Capture short git SHA. Falls back to "unknown" if we're outside a
     // repo or if git isn't installed (e.g. in a tarball build or CI cache).
+    // Stderr is silenced so the "fatal: not a git repository" message from
+    // the fallback path doesn't pollute cargo's build output.
     let sha = Command::new("git")
         .args(["rev-parse", "--short=7", "HEAD"])
+        .stderr(Stdio::null())
         .output()
         .ok()
         .and_then(|o| {
