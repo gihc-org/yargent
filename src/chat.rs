@@ -561,7 +561,7 @@ fn handle_slash(cmd: &str, state: &mut ChatState) -> bool {
 
 fn print_help() {
     println!("commands:");
-    println!("  /add <path> [path...]   share files with the model");
+    println!("  /add <path> [path...]   share files or directories with the model");
     println!("  /drop <path> [path...]  stop sharing files");
     println!("  /files                  list currently shared files");
     println!("  /tokens                 estimate tokens in next request");

@@ -38,15 +38,40 @@ impl FileContext {
         Self::default()
     }
 
-    /// Add a file by path. Errors if the path does not point at a readable
-    /// regular file. Adding the same path twice is a no-op.
+    /// Add a path. If it's a regular file, add it directly. If it's a
+    /// directory, walk recursively (respecting `.gitignore` via
+    /// `ignore::WalkBuilder`) and add every regular file found inside.
+    /// Returns the canonical path of the *directory* when a directory is
+    /// expanded, so the caller (e.g. `/add` output) shows the original
+    /// name. Adding the same path twice is a no-op.
     pub fn add(&mut self, path: impl AsRef<Path>) -> Result<PathBuf> {
         let raw = path.as_ref();
         let canon = raw
             .canonicalize()
             .with_context(|| format!("cannot resolve path '{}'", raw.display()))?;
+        if canon.is_dir() {
+            let walker = ignore::WalkBuilder::new(&canon).build();
+            for entry in walker.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    if let Ok(c) = p.canonicalize() {
+                        self.paths.insert(c);
+                    }
+                }
+            }
+            Ok(canon)
+        } else if canon.is_file() {
+            self.add_single(canon)
+        } else {
+            anyhow::bail!("'{}' is not a regular file or directory", raw.display());
+        }
+    }
+
+    /// Add a single, already-canonicalised regular file. Errors if
+    /// `canon` doesn't point at a readable regular file.
+    fn add_single(&mut self, canon: PathBuf) -> Result<PathBuf> {
         if !canon.is_file() {
-            anyhow::bail!("'{}' is not a regular file", raw.display());
+            anyhow::bail!("'{}' is not a regular file", canon.display());
         }
         self.paths.insert(canon.clone());
         Ok(canon)
@@ -308,6 +333,33 @@ mod tests {
         assert!(ctx.drop(&path));
         assert!(ctx.is_empty());
         assert!(!ctx.drop(&path), "second drop should report no-op");
+    }
+
+    #[test]
+    fn add_directory_recursively_includes_files() {
+        let dir = tempdir();
+        // Create two files directly inside the directory
+        let a = dir.join("file_a.rs");
+        let b = dir.join("file_b.rs");
+        std::fs::write(&a, "// a\n").unwrap();
+        std::fs::write(&b, "// b\n").unwrap();
+        // Create a sub-directory with another file to verify recursion
+        let sub = dir.join("nested");
+        std::fs::create_dir_all(&sub).unwrap();
+        let c = sub.join("file_c.rs");
+        std::fs::write(&c, "// c\n").unwrap();
+
+        let mut ctx = FileContext::new();
+        ctx.add(&dir).unwrap();
+
+        // All three files should be in the context
+        for f in [&a, &b, &c] {
+            assert!(
+                ctx.paths.contains(&f.canonicalize().unwrap()),
+                "expected {} to be in context",
+                f.display()
+            );
+        }
     }
 
     /// Create a unique temp directory under the OS tempdir. We roll our own so
