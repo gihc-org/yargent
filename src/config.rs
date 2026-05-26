@@ -228,6 +228,20 @@ fn builtin_default(name: &str) -> Option<ProviderPartial> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// `std::env` is process-global state. `cargo test` runs tests in parallel
+    /// within a single binary, so two tests both calling `set_var`/`remove_var`
+    /// will race and intermittently assert the wrong thing. Every test below
+    /// that mutates env first acquires this lock; tests that don't touch env
+    /// (pure parsing, user-defined-provider lookups that resolve from config
+    /// without falling back to env) skip it and stay parallel.
+    ///
+    /// Lock poisoning is intentionally swallowed via `unwrap_or_else(|p|
+    /// p.into_inner())` — if a previous test panicked while holding the lock,
+    /// we still want subsequent tests to run, and they re-establish the env
+    /// state they need explicitly before asserting.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn empty_config_is_default() {
@@ -267,12 +281,13 @@ token_budget = 2048
     #[test]
     fn resolve_overrides_default_api_key_with_config_value() {
         // User config sets api_key for deepseek; should beat env var.
-        let cfg: Config = toml::from_str("[providers.deepseek]\napi_key = \"explicit\"\n").unwrap();
-        // Use a env var that won't exist so we know the config value wins.
-        // SAFETY: This is a unit test with no other threads accessing env.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: env mutation is serialized by ENV_LOCK; no other test
+        // holding the lock can race with us.
         unsafe {
             std::env::remove_var("DEEPSEEK_API_KEY");
         }
+        let cfg: Config = toml::from_str("[providers.deepseek]\napi_key = \"explicit\"\n").unwrap();
         let resolved = cfg.resolve_provider("deepseek").unwrap();
         assert_eq!(resolved.api_key, "explicit");
         assert_eq!(resolved.base_url, "https://api.deepseek.com");
@@ -280,14 +295,16 @@ token_budget = 2048
 
     #[test]
     fn resolve_falls_back_to_env_when_config_silent() {
-        // SAFETY: This is a unit test with no other threads accessing env.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: see resolve_overrides_default_api_key_with_config_value.
         unsafe {
             std::env::set_var("DEEPSEEK_API_KEY", "from-env");
         }
         let cfg = Config::default();
         let resolved = cfg.resolve_provider("deepseek").unwrap();
         assert_eq!(resolved.api_key, "from-env");
-        // SAFETY: see above
+        // SAFETY: same lock, same scope — must clean up before releasing
+        // the guard so the next lock-holder sees a clean env.
         unsafe {
             std::env::remove_var("DEEPSEEK_API_KEY");
         }
