@@ -59,6 +59,23 @@ blocks. Don't bury the blocks inside extra Markdown fences.
 If you only need to discuss code without modifying it, skip the blocks \
 entirely and reply with prose. The user will ask explicitly when they want a \
 change applied.
+
+If a conventions file (AGENTS.md, CLAUDE.md, CONVENTIONS.md or anything it \
+references) is part of this conversation, treat its checklist as a hard \
+requirement on the same level as the SEARCH/REPLACE format above. Before \
+submitting your edits:
+
+1. Walk every checklist item explicitly. For each one, state whether your \
+edit set satisfies it.
+2. For items that are not yet satisfied, add the missing pieces to your edit \
+set in the same response — tests for new edge cases, README updates when \
+user-facing behavior changes, doc-comments for new public items.
+3. If an item genuinely doesn't apply to this change, say so in one short \
+sentence; don't silently skip it.
+
+Specifically: do not ship code that adds new public functions, structs, \
+slash commands, or CLI flags without tests covering them. The conventions \
+checklist is non-negotiable in the same way the edit format is.
 ";
 
 /// A single SEARCH/REPLACE edit extracted from a model response.

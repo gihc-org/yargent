@@ -14,6 +14,7 @@ use futures_util::StreamExt;
 
 mod chat;
 mod config;
+mod diagnostic;
 mod edit;
 mod files;
 mod git;

@@ -194,15 +194,45 @@ pub async fn run_chat(
                 if !applied.is_empty()
                     && let Some(repo) = state.repo.as_ref()
                 {
-                    let prompt = state
-                        .history
-                        .last()
-                        .map(|m| m.content.as_str())
-                        .unwrap_or("");
-                    let msg = crate::git::build_commit_message(prompt, &applied);
-                    match repo.commit_paths(&applied, &msg) {
-                        Ok(sha) => println!("  ✓ committed {}", &sha[..7.min(sha.len())]),
-                        Err(e) => eprintln!("  ✗ auto-commit failed: {e:#}"),
+                    // Diagnose the diff before committing: lines/tests/pub items
+                    // counts and a warning if AGENTS.md's "tests for new
+                    // public API" rule looks violated. Best-effort — git
+                    // failures inside diagnose come through as zeros, never
+                    // block the commit.
+                    let diag = crate::diagnostic::diagnose(repo, &applied);
+                    print!("{}", diag.render());
+
+                    // Only stop for confirmation when there's a concrete
+                    // concern. Happy path stays one-line-summary-then-commit.
+                    let proceed = if diag.has_concerns() {
+                        let answer = tokio::task::block_in_place(|| {
+                            prompt_line("commit anyway? [Y/n]: ")
+                        })
+                        .unwrap_or_default();
+                        let t = answer.trim();
+                        t.is_empty()
+                            || t.eq_ignore_ascii_case("y")
+                            || t.eq_ignore_ascii_case("yes")
+                    } else {
+                        true
+                    };
+
+                    if proceed {
+                        let prompt = state
+                            .history
+                            .last()
+                            .map(|m| m.content.as_str())
+                            .unwrap_or("");
+                        let msg = crate::git::build_commit_message(prompt, &applied);
+                        match repo.commit_paths(&applied, &msg) {
+                            Ok(sha) => println!("  ✓ committed {}", &sha[..7.min(sha.len())]),
+                            Err(e) => eprintln!("  ✗ auto-commit failed: {e:#}"),
+                        }
+                    } else {
+                        println!(
+                            "  ✗ commit skipped — files remain edited in your working tree. \
+                             Re-prompt the model to add tests, or commit manually with git."
+                        );
                     }
                 }
                 state.history.push(Message::assistant(full));

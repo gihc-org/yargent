@@ -20,6 +20,7 @@ Learning project, built in phases. Each phase ends with something usable.
 | 6 | Config file, custom providers, session flags | ✅ done |
 | 6.5 | Auto-load convention files (AGENTS.md / CLAUDE.md / …) with `@`-reference following | ✅ done |
 | 6.6 | Multi-line REPL input (`{` / `}` blocks and backslash continuation) | ✅ done |
+| 6.7 | Coding system-prompt cites AGENTS.md checklist + post-edit diagnostic warns on pub-without-tests | ✅ done |
 
 ## Daily use
 
@@ -245,6 +246,39 @@ stash before letting yargent change a file you've been editing manually.
 
 Outside a git repo (or if `git` isn't on `PATH`) auto-commit silently
 disables itself and the rest of yargent works as normal.
+
+### Post-edit diagnostic
+
+Inside a git repo, every batch of applied edits runs through a short
+diagnostic *before* the auto-commit happens: lines added/removed per
+file, new `#[test]` attribute count, new `pub` item count. The summary
+is always shown:
+
+```
+edit summary:
+  src/foo.rs: +12 -3, +2 test(s)
+  ✓ committed 1234abc
+```
+
+If the diff adds new public API (functions, structs, traits…) without
+any new tests — the canonical AGENTS.md "missing edge-case tests"
+pattern — the diagnostic flags it and asks before committing:
+
+```
+edit summary:
+  src/foo.rs: +30 -2
+  ⚠ 2 new public item(s) added without tests
+    AGENTS.md says: cover edge cases with tests in the same commit.
+commit anyway? [Y/n]:
+```
+
+Default is Y (press Enter to commit). Answering `n` skips the commit
+but leaves the files edited in your working tree — re-prompt the model
+to add tests, or commit manually with `git`.
+
+The diagnostic is best-effort: a failing `git diff` invocation comes
+through as zeros and the commit still proceeds. It never blocks edits
+themselves — only the commit step is affected.
 
 ## Repo map
 
