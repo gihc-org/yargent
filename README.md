@@ -42,7 +42,7 @@ A few keystrokes worth remembering:
 
 ```
 /help        list every command (in case you forgot)
-/add foo.rs  share a file with the model
+/add foo.rs  share a file (or a directory) with the model
 /files       show what's shared
 /map         print the repo overview
 /undo        roll back yargent's last auto-commit
@@ -120,7 +120,7 @@ yargent --system "Reply only in Danish" "what is async?"
 Inside the chat REPL, type `/help` for the command list:
 
 ```
-/add <path> [path...]   share files with the model
+/add <path> [path...]   share files or directories with the model
 /drop <path> [path...]  stop sharing files
 /files                  list currently shared files
 /tokens                 estimate tokens in next request
@@ -132,6 +132,23 @@ Inside the chat REPL, type `/help` for the command list:
 
 Added files are re-read from disk every turn, so edits you make in another
 editor propagate without an explicit refresh.
+
+`/add` also accepts directories. When you pass one, yargent walks it
+respecting `.gitignore` (so `target/`, `node_modules/`, and friends are
+filtered out for free) and adds every regular file found. The output
+reports how many files were picked up:
+
+```
+> /add src/
+[added /home/kristian/projects/yargent/src (9 files)]
+
+> /add empty_dir/
+[added /tmp/empty_dir (0 files)]
+```
+
+Re-adding the same directory yields `(0 files)` since FileContext is a
+set — useful for spotting "I thought I added that but I'd already added it"
+mistakes.
 
 ### Multi-line input
 

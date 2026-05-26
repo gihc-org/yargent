@@ -340,6 +340,72 @@ mod tests {
     }
 
     #[test]
+    fn add_empty_directory_adds_no_files() {
+        // Empty dir is accepted (no error) but produces zero new files —
+        // the count display in /add uses this to print "(0 files)" rather
+        // than silently lying that something was added.
+        let dir = tempdir();
+        let empty = dir.join("empty");
+        std::fs::create_dir(&empty).unwrap();
+
+        let mut ctx = FileContext::new();
+        let before = ctx.len();
+        let canon = ctx.add(&empty).unwrap();
+
+        assert_eq!(ctx.len(), before, "no files expected from an empty dir");
+        assert!(canon.is_dir(), "should return the dir's canonical path");
+    }
+
+    #[test]
+    fn re_adding_same_file_is_idempotent() {
+        let dir = tempdir();
+        let f = dir.join("only.rs");
+        std::fs::write(&f, "fn main() {}\n").unwrap();
+
+        let mut ctx = FileContext::new();
+        ctx.add(&f).unwrap();
+        let after_first = ctx.len();
+        ctx.add(&f).unwrap();
+
+        assert_eq!(
+            ctx.len(),
+            after_first,
+            "re-adding the same file should leave the set unchanged"
+        );
+    }
+
+    #[test]
+    fn re_adding_same_directory_adds_nothing_new() {
+        let dir = tempdir();
+        let sub = dir.join("project");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("a.rs"), "// a\n").unwrap();
+        std::fs::write(sub.join("b.rs"), "// b\n").unwrap();
+
+        let mut ctx = FileContext::new();
+        ctx.add(&sub).unwrap();
+        let after_first = ctx.len();
+        ctx.add(&sub).unwrap();
+
+        assert_eq!(
+            ctx.len(),
+            after_first,
+            "re-adding the same directory should add nothing new — \
+             the count display relies on this to show \"(0 files)\""
+        );
+    }
+
+    #[test]
+    fn add_errors_on_missing_path() {
+        let dir = tempdir();
+        let missing = dir.join("nope.rs");
+
+        let mut ctx = FileContext::new();
+        let result = ctx.add(&missing);
+        assert!(result.is_err(), "missing path should error, not silently no-op");
+    }
+
+    #[test]
     fn add_directory_recursively_includes_files() {
         let dir = tempdir();
         // Create two files directly inside the directory
