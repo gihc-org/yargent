@@ -192,12 +192,7 @@ pub fn build_commit_message(prompt: &str, paths: &[PathBuf]) -> String {
 }
 
 fn compose_subject(prompt: &str) -> String {
-    let first_line = prompt.lines().next().unwrap_or("").trim();
-    let cleaned = if first_line.is_empty() {
-        "apply edits"
-    } else {
-        first_line
-    };
+    let cleaned = first_meaningful_line(prompt).unwrap_or("apply edits");
     const LIMIT: usize = 60;
     if cleaned.chars().count() <= LIMIT {
         cleaned.to_string()
@@ -205,6 +200,30 @@ fn compose_subject(prompt: &str) -> String {
         let truncated: String = cleaned.chars().take(LIMIT - 1).collect();
         format!("{truncated}…")
     }
+}
+
+/// Walk `prompt` looking for the first line that's actually content — i.e.
+/// not blank, not a bare multi-line block marker (`{` / `}`), and not a bare
+/// line-continuation backslash. Strips a trailing `\` from the chosen line
+/// so the commit subject reads cleanly.
+///
+/// Returns `None` when the prompt is empty or contains only noise lines.
+/// The caller substitutes a default ("apply edits") in that case.
+fn first_meaningful_line(prompt: &str) -> Option<&str> {
+    for line in prompt.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed == "{" || trimmed == "}" || trimmed == "\\" {
+            continue;
+        }
+        // Strip trailing backslash continuation if present, then re-trim any
+        // whitespace it was hiding.
+        let cleaned = trimmed.strip_suffix('\\').unwrap_or(trimmed).trim_end();
+        if cleaned.is_empty() {
+            continue;
+        }
+        return Some(cleaned);
+    }
+    None
 }
 
 fn stderr_or_status(out: &Output) -> String {
@@ -240,6 +259,44 @@ mod tests {
     #[test]
     fn subject_falls_back_when_prompt_blank() {
         let msg = build_commit_message("   \n\n", &[PathBuf::from("x")]);
+        assert_eq!(msg.lines().next().unwrap(), "yargent: apply edits");
+    }
+
+    #[test]
+    fn subject_skips_opening_brace_from_multiline_block() {
+        // The case that motivated this fix: multi-line block input means the
+        // first line is literally "{", and we used to produce "yargent: {".
+        let prompt = "{\nAdd the yargent version to the startup banner\nand also do X\n}";
+        let msg = build_commit_message(prompt, &[PathBuf::from("x")]);
+        assert_eq!(
+            msg.lines().next().unwrap(),
+            "yargent: Add the yargent version to the startup banner"
+        );
+    }
+
+    #[test]
+    fn subject_skips_lone_closing_brace_and_backslash() {
+        // Closing `}` and bare backslash continuations are also noise.
+        let prompt = "}\n\\\nReal content here";
+        let msg = build_commit_message(prompt, &[PathBuf::from("x")]);
+        assert_eq!(msg.lines().next().unwrap(), "yargent: Real content here");
+    }
+
+    #[test]
+    fn subject_strips_trailing_backslash_continuation() {
+        // Backslash continuation on the chosen line shouldn't end up in the
+        // committed subject.
+        let prompt = "first line of prompt \\\nrest of prompt";
+        let msg = build_commit_message(prompt, &[PathBuf::from("x")]);
+        assert_eq!(msg.lines().next().unwrap(), "yargent: first line of prompt");
+    }
+
+    #[test]
+    fn subject_falls_back_when_only_block_markers() {
+        // Pathological case: prompt is literally just block markers with no
+        // content. The old code would have produced "yargent: {".
+        let prompt = "{\n\n}";
+        let msg = build_commit_message(prompt, &[PathBuf::from("x")]);
         assert_eq!(msg.lines().next().unwrap(), "yargent: apply edits");
     }
 
