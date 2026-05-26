@@ -7,10 +7,20 @@
 //! itself applied in a future phase) propagate automatically without an explicit
 //! `/refresh` command.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+
+/// Filenames yargent auto-loads from the repo root as "convention files" —
+/// short Markdown documents that describe coding rules, conventions, or
+/// general project context. Anything found here is added to the file context
+/// at startup as if the user had typed `/add` for it.
+///
+/// Drop one of these in your repo root and yargent picks it up next launch.
+/// Override the list per project via `[conventions] paths = [...]` in the
+/// config file.
+pub const DEFAULT_CONVENTION_NAMES: &[&str] = &["AGENTS.md", "CLAUDE.md", "CONVENTIONS.md"];
 
 /// Ordered set of file paths currently shared with the model.
 ///
@@ -105,6 +115,60 @@ impl FileContext {
     }
 }
 
+/// Find convention files under `root` and any single-level `@path` references
+/// they contain, returning canonical absolute paths suitable for
+/// [`FileContext::add`].
+///
+/// A "convention file" is a top-level Markdown file matching one of `names`
+/// — typically [`DEFAULT_CONVENTION_NAMES`]. We additionally follow the
+/// aider/Claude Code convention where the file is allowed to be just a list
+/// of `@relative/path` lines, each pulling in another file. We follow those
+/// references *one level deep* — references inside referenced files are
+/// silently ignored to keep cycles impossible and the loading deterministic.
+///
+/// Missing convention files are silently skipped (the common case is that
+/// most projects don't have any). Missing `@`-referenced files are also
+/// silently skipped — the referencing convention file is still loaded, so
+/// the model at least sees the unresolved reference and can react to it.
+pub fn discover_conventions(root: &Path, names: &[&str]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+
+    for name in names {
+        let path = root.join(name);
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(canon) = path.canonicalize() else { continue };
+        if !seen.insert(canon.clone()) {
+            continue;
+        }
+        out.push(canon.clone());
+
+        // Single-pass: scan this convention file for @path references and
+        // pull in anything that resolves. Recursive expansion is deliberately
+        // not implemented to avoid cycles and to keep load behavior obvious.
+        let Ok(content) = std::fs::read_to_string(&canon) else { continue };
+        let parent = canon.parent().unwrap_or_else(|| Path::new("."));
+        for line in content.lines() {
+            let Some(rest) = line.trim().strip_prefix('@') else {
+                continue;
+            };
+            let ref_path = parent.join(rest.trim());
+            if !ref_path.is_file() {
+                continue;
+            }
+            if let Ok(ref_canon) = ref_path.canonicalize()
+                && seen.insert(ref_canon.clone())
+            {
+                out.push(ref_canon);
+            }
+        }
+    }
+
+    out
+}
+
 /// Render `path` relative to the current working directory if it's underneath
 /// it, otherwise fall back to the absolute path.
 fn display_path(path: &Path) -> String {
@@ -167,6 +231,69 @@ mod tests {
 
         assert!(rendered.contains("```rust"));
         assert!(rendered.contains("fn main() {}"));
+    }
+
+    #[test]
+    fn discover_returns_empty_when_no_convention_files() {
+        let dir = tempdir();
+        let found = discover_conventions(&dir, DEFAULT_CONVENTION_NAMES);
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn discover_finds_plain_convention_file() {
+        let dir = tempdir();
+        std::fs::write(dir.join("AGENTS.md"), "be tidy.\n").unwrap();
+        let found = discover_conventions(&dir, DEFAULT_CONVENTION_NAMES);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].ends_with("AGENTS.md"));
+    }
+
+    #[test]
+    fn discover_follows_at_references_one_level() {
+        let dir = tempdir();
+        // AGENTS.md contains a @reference to another file in the same dir.
+        std::fs::write(dir.join("AGENTS.md"), "@style.md\n").unwrap();
+        std::fs::write(dir.join("style.md"), "use four spaces.\n").unwrap();
+
+        let found = discover_conventions(&dir, DEFAULT_CONVENTION_NAMES);
+        assert_eq!(found.len(), 2, "expected AGENTS.md + style.md, got {found:?}");
+        let names: Vec<_> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"AGENTS.md".to_string()));
+        assert!(names.contains(&"style.md".to_string()));
+    }
+
+    #[test]
+    fn discover_ignores_missing_at_reference() {
+        let dir = tempdir();
+        std::fs::write(dir.join("AGENTS.md"), "@nonexistent.md\nstill here\n").unwrap();
+        let found = discover_conventions(&dir, DEFAULT_CONVENTION_NAMES);
+        assert_eq!(found.len(), 1, "missing references should not block loading");
+        assert!(found[0].ends_with("AGENTS.md"));
+    }
+
+    #[test]
+    fn discover_does_not_recurse_into_referenced_file() {
+        // a.md → @b.md; b.md → @c.md. We should pick up a and b but NOT c.
+        let dir = tempdir();
+        std::fs::write(dir.join("AGENTS.md"), "@b.md\n").unwrap();
+        std::fs::write(dir.join("b.md"), "@c.md\n").unwrap();
+        std::fs::write(dir.join("c.md"), "should not be loaded\n").unwrap();
+
+        let found = discover_conventions(&dir, DEFAULT_CONVENTION_NAMES);
+        let names: Vec<_> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"AGENTS.md".to_string()));
+        assert!(names.contains(&"b.md".to_string()));
+        assert!(
+            !names.contains(&"c.md".to_string()),
+            "depth > 1 should not be followed (got {names:?})"
+        );
     }
 
     #[test]

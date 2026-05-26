@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use futures_util::StreamExt;
@@ -15,7 +15,7 @@ use rustyline::error::ReadlineError;
 use tiktoken_rs::CoreBPE;
 
 use crate::edit::{self, EditOutcome};
-use crate::files::FileContext;
+use crate::files::{self, FileContext};
 use crate::git::Repo;
 use crate::provider::{LLMProvider, Message};
 use crate::repomap::RepoMap;
@@ -38,6 +38,13 @@ pub struct SessionOptions {
     /// Whether the repo map is enabled by default for this session. The
     /// user can still toggle with `/map-on` / `/map-off` at runtime.
     pub map_default_enabled: bool,
+    /// Skip auto-loading convention files this session (CLI: `--no-conventions`).
+    pub no_conventions: bool,
+    /// Whether convention auto-loading is enabled by default (from config).
+    pub conventions_default_enabled: bool,
+    /// Override list of convention filenames from config. `None` means use
+    /// [`files::DEFAULT_CONVENTION_NAMES`].
+    pub conventions_paths: Option<Vec<String>>,
 }
 
 /// Run the interactive chat loop until the user exits with `/quit` or Ctrl-D.
@@ -80,6 +87,33 @@ pub async fn run_chat(
     let map_enabled = opts.map_default_enabled && !opts.no_map;
     let map_token_budget = opts.map_token_budget.unwrap_or(DEFAULT_MAP_TOKEN_BUDGET);
     let mut state = ChatState::new(system, tokenizer, repo, repomap, map_enabled, map_token_budget);
+
+    // Auto-load convention files from the repo root. Failures here are reported
+    // inline but never abort startup — the chat REPL is still useful without
+    // conventions loaded.
+    if opts.conventions_default_enabled && !opts.no_conventions {
+        let names_storage: Vec<String>;
+        let names: Vec<&str> = match opts.conventions_paths {
+            Some(custom) => {
+                names_storage = custom;
+                names_storage.iter().map(String::as_str).collect()
+            }
+            None => files::DEFAULT_CONVENTION_NAMES.to_vec(),
+        };
+        let found = files::discover_conventions(&map_root, &names);
+        if !found.is_empty() {
+            let mut added_names: Vec<String> = Vec::with_capacity(found.len());
+            for path in &found {
+                match state.files.add(path) {
+                    Ok(canon) => added_names.push(short_name(&canon)),
+                    Err(e) => eprintln!("conventions: skipping {}: {e:#}", path.display()),
+                }
+            }
+            if !added_names.is_empty() {
+                println!("conventions: loaded {}", added_names.join(", "));
+            }
+        }
+    }
 
     let mut rl = rustyline::DefaultEditor::new()?;
     let history_path = history_file_path();
@@ -537,4 +571,13 @@ fn print_help() {
 
 fn history_file_path() -> Option<PathBuf> {
     dirs::data_local_dir().map(|p| p.join("yargent").join("history"))
+}
+
+/// Trim a path to just its filename for compact status lines. Falls back to
+/// the full path if there's no filename component (rare — root directories
+/// and similar edge cases).
+fn short_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }

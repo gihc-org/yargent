@@ -55,6 +55,10 @@ struct Cli {
     /// Skip injecting the repo map for this session.
     #[arg(long)]
     no_map: bool,
+
+    /// Skip auto-loading convention files (AGENTS.md / CLAUDE.md / CONVENTIONS.md).
+    #[arg(long)]
+    no_conventions: bool,
 }
 
 /// Resolve `--model` → config.default_model → FALLBACK_MODEL.
@@ -132,6 +136,9 @@ async fn main() -> Result<()> {
                 no_map: cli.no_map,
                 map_token_budget: config.repomap.token_budget,
                 map_default_enabled: config.repomap.enabled.unwrap_or(true),
+                no_conventions: cli.no_conventions,
+                conventions_default_enabled: config.conventions.enabled.unwrap_or(true),
+                conventions_paths: config.conventions.paths.clone(),
             };
             chat::run_chat(provider, cli.system, opts).await
         }

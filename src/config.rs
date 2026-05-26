@@ -61,6 +61,8 @@ pub struct Config {
     pub providers: HashMap<String, ProviderPartial>,
     #[serde(default)]
     pub repomap: RepomapConfig,
+    #[serde(default)]
+    pub conventions: ConventionsConfig,
 }
 
 /// User-overridable provider settings. All fields optional because users
@@ -92,6 +94,18 @@ pub struct RepomapConfig {
     pub enabled: Option<bool>,
     /// Soft cap on repo-map size in tokens.
     pub token_budget: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct ConventionsConfig {
+    /// Whether to auto-load convention files at startup. Default: true.
+    /// Override at runtime with `--no-conventions`.
+    pub enabled: Option<bool>,
+    /// Convention filenames to look for in the repo root. If unset, yargent
+    /// looks for `AGENTS.md`, `CLAUDE.md`, `CONVENTIONS.md`. Set to `[]` to
+    /// disable, or to a custom list to override the defaults wholesale.
+    pub paths: Option<Vec<String>>,
 }
 
 /// Fully-resolved provider settings ready to construct an LLMProvider.
