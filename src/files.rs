@@ -42,8 +42,15 @@ impl FileContext {
     /// directory, walk recursively (respecting `.gitignore` via
     /// `ignore::WalkBuilder`) and add every regular file found inside.
     /// Returns the canonical path of the *directory* when a directory is
-    /// expanded, so the caller (e.g. `/add` output) shows the original
-    /// name. Adding the same path twice is a no-op.
+    /// expanded — the caller uses that to display the original name in
+    /// `/add` output. Adding the same path twice is a no-op.
+    ///
+    /// Per-file canonicalize failures during a directory walk produce a
+    /// warning on stderr and skip the file; the walk continues. The whole
+    /// call only errors if the *top-level* path can't be resolved at all.
+    /// In practice the per-file branch fires only on filesystem races
+    /// (file removed between walker enumeration and canonicalize) — broken
+    /// symlinks are already filtered out by `Path::is_file()`.
     pub fn add(&mut self, path: impl AsRef<Path>) -> Result<PathBuf> {
         let raw = path.as_ref();
         let canon = raw
@@ -54,18 +61,7 @@ impl FileContext {
             for entry in walker.flatten() {
                 let p = entry.path();
                 if p.is_file() {
-                    match p.canonicalize() {
-                        Ok(c) => {
-                            self.paths.insert(c);
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "warning: cannot canonicalize '{}' — {}",
-                                p.display(),
-                                e
-                            );
-                        }
-                    }
+                    self.try_insert_canonical(p);
                 }
             }
             Ok(canon)
@@ -73,6 +69,30 @@ impl FileContext {
             self.add_single(canon)
         } else {
             anyhow::bail!("'{}' is not a regular file or directory", raw.display());
+        }
+    }
+
+    /// Canonicalize `p` and insert it into the path set, warning on failure
+    /// rather than aborting. Thin wrapper that exists so the warning-on-Err
+    /// behavior can be unit-tested via [`try_insert`] without depending on
+    /// a filesystem state that's hard to set up deterministically.
+    fn try_insert_canonical(&mut self, p: &Path) {
+        self.try_insert(p, p.canonicalize());
+    }
+
+    /// Inner half of [`try_insert_canonical`], with the canonicalize result
+    /// passed in. On `Ok`, the canonical path joins the set. On `Err`, we
+    /// emit a one-line stderr warning naming the path and the OS error, and
+    /// drop the file — directory walks should produce as much as they can,
+    /// not abort on a single unreadable entry.
+    fn try_insert(&mut self, p: &Path, result: std::io::Result<PathBuf>) {
+        match result {
+            Ok(c) => {
+                self.paths.insert(c);
+            }
+            Err(e) => {
+                eprintln!("warning: cannot canonicalize '{}' — {}", p.display(), e);
+            }
         }
     }
 
@@ -402,6 +422,36 @@ mod tests {
             "re-adding the same directory should add nothing new — \
              the count display relies on this to show \"(0 files)\""
         );
+    }
+
+    #[test]
+    fn try_insert_adds_path_on_ok() {
+        // The canonicalize-succeeds half of the directory-walk inner loop.
+        // Driven via try_insert directly because synthesizing the Err half
+        // requires a fake io::Error (see next test), and we want symmetric
+        // coverage of both arms.
+        let mut ctx = FileContext::new();
+        ctx.try_insert(
+            Path::new("/tmp/whatever"),
+            Ok(PathBuf::from("/tmp/canonical-whatever")),
+        );
+        assert_eq!(ctx.len(), 1);
+        assert!(
+            ctx.paths()
+                .any(|p| p == Path::new("/tmp/canonical-whatever"))
+        );
+    }
+
+    #[test]
+    fn try_insert_warns_and_skips_on_err() {
+        // The canonicalize-fails half: in production this fires for race
+        // conditions (file disappeared between walker and canonicalize).
+        // We synthesize the io::Error here because reproducing that race
+        // deterministically on the real filesystem is impractical.
+        let mut ctx = FileContext::new();
+        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "synthetic");
+        ctx.try_insert(Path::new("/tmp/gone.rs"), Err(err));
+        assert_eq!(ctx.len(), 0, "Err arm must not insert anything");
     }
 
     #[test]
