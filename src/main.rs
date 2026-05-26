@@ -127,8 +127,8 @@ async fn main() -> Result<()> {
         && p.trim().is_empty()
     {
         anyhow::bail!(
-            "prompt is empty — pass a non-empty prompt or omit the argument \
-             to drop into the interactive chat REPL"
+            "prompt is empty (got {p:?}) — pass a non-empty prompt or omit \
+             the argument to drop into the interactive chat REPL"
         );
     }
 
