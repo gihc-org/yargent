@@ -18,6 +18,7 @@ Learning project, built in phases. Each phase ends with something usable.
 | 4 | Git integration (auto-commit, `/undo`) | ✅ done |
 | 5 | Tree-sitter repo map (PageRank over symbol graph) | ✅ done |
 | 6 | Config file, custom providers, session flags | ✅ done |
+| 6.5 | Auto-load convention files (AGENTS.md / CLAUDE.md / …) with `@`-reference following | ✅ done |
 
 ## Daily use
 
@@ -251,6 +252,48 @@ We shell out to the system `git` binary rather than linking a Rust git library:
 Subprocess overhead is invisible at human-latency. Worth revisiting if we
 ever need to embed yargent somewhere without a git binary on PATH.
 
+## Convention files
+
+At startup yargent looks in the repo root for any of three "convention
+files" — short Markdown documents that describe coding rules or project
+context the model should always have in mind. Found files are auto-added
+to the chat context exactly as if you had typed `/add` for each.
+
+Defaults:
+
+```
+AGENTS.md
+CLAUDE.md
+CONVENTIONS.md
+```
+
+Convention files can either contain the rules inline, or be a list of
+`@path` references pulling in other Markdown documents. yargent follows
+those references **one level deep** (no recursion — keeps cycle handling
+trivial and load behavior predictable). This composes nicely with git
+submodules: a one-line `AGENTS.md` like
+
+```markdown
+@.guidelines/testing-and-docs.md
+```
+
+…pulls in the real conventions from a shared submodule, so multiple
+projects can share one set of rules without duplicating them.
+
+Loaded conventions appear in `/files` and can be `/drop`ped like any
+other file. Override the auto-loaded filenames in config, or skip the
+whole thing for one session with `--no-conventions`:
+
+```toml
+[conventions]
+enabled = true                            # default true
+paths = ["AGENTS.md", "STYLEGUIDE.md"]    # default ["AGENTS.md", "CLAUDE.md", "CONVENTIONS.md"]
+```
+
+If an `@`-referenced file is missing the reference is silently skipped,
+not an error — the parent convention file still loads, and the bare `@…`
+line stays visible to the model so it can react if needed.
+
 ## Configuration
 
 yargent runs with zero config — set a `*_API_KEY` env var and you're done.
@@ -302,9 +345,10 @@ service).
 A few flags switch features off for one session without editing config:
 
 ```bash
-./target/release/yargent --no-commit "..."   # don't auto-commit edits
-./target/release/yargent --no-map "..."      # don't inject the repo map
-./target/release/yargent --config /tmp/test-config.toml   # use a different config file
+yargent --no-commit "..."        # don't auto-commit edits
+yargent --no-map "..."           # don't inject the repo map
+yargent --no-conventions "..."   # don't auto-load AGENTS.md/CLAUDE.md/CONVENTIONS.md
+yargent --config /tmp/test.toml  # use a different config file
 ```
 
 ## Building on Termux (Android)
