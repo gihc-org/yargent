@@ -118,6 +118,19 @@ async fn run_one_shot(
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Reject empty/whitespace-only one-shot prompts before we do anything
+    // network-shaped. An empty body still hits the API and costs tokens —
+    // some models even respond cheerfully to nothing — so we'd rather fail
+    // fast with a helpful message than burn the user's credits silently.
+    if let Some(ref p) = cli.prompt
+        && p.trim().is_empty()
+    {
+        anyhow::bail!(
+            "prompt is empty — pass a non-empty prompt or omit the argument \
+             to drop into the interactive chat REPL"
+        );
+    }
+
     let config_path = cli
         .config
         .clone()
