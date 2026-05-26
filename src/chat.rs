@@ -80,7 +80,12 @@ pub async fn run_chat(
         .map(|r| r.root().to_path_buf())
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    print!("yargent — scanning {}... ", map_root.display());
+    print!(
+        "yargent v{} ({}) — scanning {}... ",
+        env!("CARGO_PKG_VERSION"),
+        env!("YARGENT_GIT_SHA"),
+        map_root.display()
+    );
     io::stdout().flush().ok();
     let map_start = std::time::Instant::now();
     let repomap = RepoMap::build(&map_root);
