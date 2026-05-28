@@ -1,0 +1,53 @@
+PRISUDVIKLING OG MODELVALG I CLAUDE CODE
+=========================================
+
+Observation: yargent-projektet har kostet markant mere end fx ipfs-apps
+(anslået faktor 2+), på trods af at yargent har færre commits og mindre
+kodebase.
+
+FORKLARINGER
+
+1. Modelskifte
+   Claude Code kørte på Opus 4.7 i denne session.
+   Opus koster ca. 5x mere end Sonnet per token.
+   Hvis ipfs-apps primært blev udviklet på Sonnet, forklarer dette alene
+   en faktor 2-3 i prisforskel.
+
+   Priser (omtrentlige):
+   Opus 4.7:      $15/M input-tokens,  $75/M output-tokens
+   Sonnet 4.6:     $3/M input-tokens,  $15/M output-tokens
+
+2. Lang kontinuerlig session med --continue
+   Yargent er bygget i en næsten-kontinuerlig samtale over flere dage.
+   Hver --continue gensender hele transcript-historikken til API'et.
+   Kontekstomkostningen vokser lineært med samtalens længde.
+   Prompt-cache hjælper kun inden for 5 minutters TTL.
+   Ipfs-apps havde formentlig mange kortere sessioner.
+
+3. Meta-arbejde og code-reviews
+   Yargent indeholdt mange code-reviews, guideline-diskussioner og
+   strategisnakke. Reviewsvar er typisk 300-500 ord output, dvs. dyrere
+   per opnået resultat end traditionel implementering.
+
+4. Tool-tunge kald
+   cargo test, cargo build, git diff og git log kørt mange gange per tur.
+   Hvert tool-output ryger ind i konteksten og gensendes næste tur.
+
+LØSNING
+
+Model sat til claude-sonnet-4-6 i ~/.claude/settings.json.
+Dette gælder for alle fremtidige sessioner.
+
+For den aktuelle session skiftede vi model ved at køre:
+  claude --model claude-sonnet-4-6 --continue
+
+Fra og med dette tidspunkt kører vi Sonnet 4.6.
+
+ANBEFALINGER TIL FREMTIDEN
+
+- Brug korte fokuserede sessioner frem for én lang --continue-session.
+  Referater i ./referater/ gør det let at starte frisk uden at miste kontekst.
+- Skift til Opus kun ved behov for kompleks reasoning eller svære reviews.
+  De fleste implementeringsopgaver klares fint af Sonnet.
+- Trim tool-output med head/tail hvor muligt for at holde konteksten lille.
+- Send kun de svære code-review-cases til AI; læs selv diff på simple ændringer.
